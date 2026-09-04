@@ -2,66 +2,32 @@
 #include <string>
 #include <array>
 #include <unistd.h>
-#include <termios.h>
-#include <poll.h>
-#include <csignal>
 #include <cstdlib>
 #include <ctime>
 #include <vector>
 #include <iomanip>
-#include <sys/ioctl.h>
 #include <algorithm>
 #include <cmath>
-#include <cerrno>
 #include <sys/stat.h>
 #include <fstream>
 #include <map>
-// [MOD] Thêm nlohmann json
+#include <clocale>
+
+// [NCURSES] Thư viện thay thế cho termios và poll
+#include <ncurses.h>
 #include "json.hpp"
 
 using json = nlohmann::json;
 
-volatile sig_atomic_t g_winch = 0;
-
-void sigwinch_handler(int) {
-    g_winch = 1;
-}
-
-struct TerminalSession {
-    static inline termios orig_termios;
-
-    static void restore() {
-        std::cout << "\033[0m\033[?25h\033[0 q\033[?1049l" << std::flush;
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
-    }
-
-    static void signal_handler(int) {
-        restore();
-        std::exit(0);
-    }
-
-    static void init() {
-        tcgetattr(STDIN_FILENO, &orig_termios);
-        std::atexit(restore);
-        std::signal(SIGINT, signal_handler);
-        std::signal(SIGTERM, signal_handler);
-
-        struct sigaction sa;
-        sa.sa_handler = sigwinch_handler;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0; 
-        sigaction(SIGWINCH, &sa, NULL);
-
-        termios raw = orig_termios;
-        raw.c_lflag &= ~(ECHO | ICANON | ISIG);
-        raw.c_iflag &= ~(IXON | ICRNL);
-        raw.c_cc[VMIN] = 1;
-        raw.c_cc[VTIME] = 0;
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
-
-        std::cout << "\033[?1049h\033[2J\033[H\033[?25l" << std::flush;
-    }
-};
+// [NCURSES] Định nghĩa các cặp màu (Color Pairs)
+#define CP_NORMAL   1
+#define CP_SELECTED 2
+#define CP_RED      3
+#define CP_GREEN    4
+#define CP_GRAY     5
+#define CP_MAGENTA  6
+#define CP_CYAN     7
+#define CP_BLUE     8
 
 enum class Page { MAIN_MENU, SCHEDULE, POMODORO, POMODORO_RUN, INFO, TASK_EDIT };
 
@@ -120,6 +86,34 @@ bool is_eye_break_active = false;
 int eye_break_remaining = 0;
 bool is_pomo_active = false; 
 bool is_pomo_paused = false;
+
+// ---------------------------------------------------------
+// [NCURSES] Khởi tạo và dọn dẹp môi trường
+void init_ncurses() {
+    setlocale(LC_ALL, ""); // Hỗ trợ hiển thị Unicode (UTF-8)
+    initscr();
+    cbreak();
+    noecho();
+    keypad(stdscr, TRUE); // Hỗ trợ phím mũi tên, chức năng
+    curs_set(0);          // Ẩn con trỏ mặc định
+    
+    start_color();
+    use_default_colors(); // Dùng màu nền gốc của Terminal (trong suốt/đen)
+
+    init_pair(CP_NORMAL, -1, -1);
+    init_pair(CP_SELECTED, COLOR_BLACK, COLOR_WHITE);
+    init_pair(CP_RED, COLOR_RED, -1);
+    init_pair(CP_GREEN, COLOR_GREEN, -1);
+    init_pair(CP_GRAY, COLOR_BLACK, -1); 
+    init_pair(CP_MAGENTA, COLOR_MAGENTA, -1);
+    init_pair(CP_CYAN, COLOR_CYAN, -1);
+    init_pair(CP_BLUE, COLOR_BLUE, -1);
+}
+
+void cleanup_ncurses() {
+    endwin();
+}
+// ---------------------------------------------------------
 
 std::string format_time_24(int total_mins) {
     int h = (total_mins / 60) % 24;
@@ -230,44 +224,33 @@ bool is_same_day(const std::tm& d1, const std::tm& d2) {
     return (d1.tm_year == d2.tm_year && d1.tm_yday == d2.tm_yday);
 }
 
-void get_term_size(int &rows, int &cols) {
-    struct winsize w;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == -1 || w.ws_col == 0) {
-        rows = 24; cols = 80;
-    } else {
-        rows = w.ws_row; cols = w.ws_col;
-    }
-}
-
 std::string center_text(const std::string& text, int width) {
     int pad_left = std::max(0, (width - (int)text.length()) / 2);
     int pad_right = std::max(0, width - (int)text.length() - pad_left);
     return std::string(pad_left, ' ') + text + std::string(pad_right, ' ');
 }
 
-std::string draw_box(const std::string& text, int width, bool selected, const std::string& lm) {
-    std::string res = "";
-    std::string color = selected ? "\033[7m" : "";
-    std::string reset = "\033[0m";
+// [NCURSES] Vẽ hộp giao diện sử dụng ký tự Unicode liền nét
+void draw_box_ncurses(int start_y, int start_x, const std::string& text, int width, bool selected) {
+    if (selected) attron(COLOR_PAIR(CP_SELECTED));
+    
     int p_l = std::max(0, (width - (int)text.length()) / 2);
     int p_r = std::max(0, width - (int)text.length() - p_l);
     
     std::string h_line = "";
-    for (int i = 0; i < width; ++i) h_line += "─";
+    for (int i = 0; i < width; ++i) h_line += "─"; 
     
-    res += lm + color + "┌" + h_line + "┐" + reset + "\033[K\n";
-    res += lm + color + "│" + std::string(p_l, ' ') + text + std::string(p_r, ' ') + "│" + reset + "\033[K\n";
-    res += lm + color + "└" + h_line + "┘" + reset + "\033[K\n";
-    return res;
+    mvprintw(start_y, start_x, "┌%s┐", h_line.c_str());
+    mvprintw(start_y + 1, start_x, "│%*s%s%*s│", p_l, "", text.c_str(), p_r, "");
+    mvprintw(start_y + 2, start_x, "└%s┘", h_line.c_str());
+    
+    if (selected) attroff(COLOR_PAIR(CP_SELECTED));
 }
 
 void render_ui(Page current_page, int sel_idx, int sched_sel_c, const std::tm& current_week_sun, const std::tm& today, 
                int work_time, int break_time, bool eye_break_enabled, int time_remaining, bool is_work_phase, bool is_task_focused) {
-    int rows, cols;
-    get_term_size(rows, cols);
     
-    // [MOD] Thêm \033[0m ngay từ đầu để triệt tiêu vệt màu nền bị kẹt lại từ \033[u
-    std::string out = "\033[0m\033[H"; 
+    erase(); 
 
     std::string today_str = format_date(today);
     int now_min = today.tm_hour * 60 + today.tm_min;
@@ -275,45 +258,28 @@ void render_ui(Page current_page, int sel_idx, int sched_sel_c, const std::tm& c
     if (current_page == Page::MAIN_MENU) {
         int menu_width = 24;
         int total_height = MENU_SIZE * 4 - 1;
-        int top_pad = std::max(0, (rows - total_height) / 2);
-        int left_pad = std::max(0, (cols - menu_width - 2) / 2);
-        std::string lm(left_pad, ' ');
+        int start_y = std::max(0, (LINES - total_height) / 2);
+        int start_x = std::max(0, (COLS - menu_width - 2) / 2);
 
-        for (int i = 0; i < top_pad; ++i) out += "\033[K\n";
         for (int r = 0; r < MENU_SIZE; ++r) {
-            out += draw_box(MENU_ITEMS[r], menu_width, (r == sel_idx), lm);
-            if (r < MENU_SIZE - 1) out += "\033[K\n";
+            draw_box_ncurses(start_y + (r * 4), start_x, MENU_ITEMS[r], menu_width, (r == sel_idx));
         }
     } 
     else if (current_page == Page::SCHEDULE) {
         int cell_w = 9;
         int sched_width = 7 * cell_w + 8;
-        int top_pad = std::max(0, (rows - 22) / 2);
-        int left_pad = std::max(0, (cols - sched_width) / 2);
-        std::string lm(left_pad, ' ');
+        int start_y = std::max(0, (LINES - 22) / 2);
+        int start_x = std::max(0, (COLS - sched_width) / 2);
 
-        for (int i = 0; i < top_pad; ++i) out += "\033[K\n";
-
-        auto line_builder = [&](std::string l, std::string m, std::string r, std::string fill) {
-            std::string s = lm + l;
-            for(int i = 0; i < 7; ++i) {
-                for(int j=0; j<cell_w; ++j) s += fill;
-                if (i < 6) s += m;
-            }
-            s += r + "\033[K\n";
-            return s;
-        };
-
-        std::string top_border = line_builder("┌", "┬", "┐", "─");
-        std::string sep_border = line_builder("├", "┼", "┤", "─");
-        std::string bot_border = line_builder("└", "┴", "┘", "─");
-
-        std::string mid_names = lm + "│";
-        std::string mid_dates = lm + "│";
-        std::string mid_tasks = lm + "│";
+        // [MOD] Bảng Schedule nét liền
+        mvaddstr(start_y, start_x, "┌─────────┬─────────┬─────────┬─────────┬─────────┬─────────┬─────────┐");
+        mvaddstr(start_y + 1, start_x, "│");
+        mvaddstr(start_y + 2, start_x, "│");
+        mvaddstr(start_y + 3, start_x, "│");
 
         const std::array<std::string, 7> day_names = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
 
+        int cur_x = start_x + 1;
         for (int c = 0; c < 7; ++c) {
             std::tm day = add_days(current_week_sun, c);
             bool is_today = is_same_day(day, today);
@@ -321,7 +287,6 @@ void render_ui(Page current_page, int sel_idx, int sched_sel_c, const std::tm& c
 
             char date_buf[16];
             std::strftime(date_buf, sizeof(date_buf), "%d/%m", &day);
-
             std::string day_key = format_date(day);
             int t_cnt = tasks_db[day_key].size();
             
@@ -329,31 +294,43 @@ void render_ui(Page current_page, int sel_idx, int sched_sel_c, const std::tm& c
             std::string date_str = center_text(std::string(date_buf), cell_w);
             std::string cnt_str  = t_cnt > 0 ? center_text("[" + std::to_string(t_cnt) + "]", cell_w) : center_text("", cell_w);
 
-            std::string color = is_today ? "\033[31m" : ""; 
-            if (is_selected) color = "\033[7m" + color;
-            std::string reset = "\033[0m";
+            int color = is_today ? CP_RED : CP_NORMAL;
+            if (is_selected) attron(A_REVERSE);
+            attron(COLOR_PAIR(color));
 
-            mid_names += color + name_str + reset + "│";
-            mid_dates += color + date_str + reset + "│";
-            mid_tasks += color + cnt_str + reset + "│";
+            mvprintw(start_y + 1, cur_x, "%s", name_str.c_str());
+            mvprintw(start_y + 2, cur_x, "%s", date_str.c_str());
+            mvprintw(start_y + 3, cur_x, "%s", cnt_str.c_str());
+
+            attroff(COLOR_PAIR(color));
+            if (is_selected) attroff(A_REVERSE);
+            
+            mvaddstr(start_y + 1, cur_x + cell_w, "│");
+            mvaddstr(start_y + 2, cur_x + cell_w, "│");
+            mvaddstr(start_y + 3, cur_x + cell_w, "│");
+            cur_x += cell_w + 1;
         }
-        mid_names += "\033[K\n";
-        mid_dates += "\033[K\n";
-        mid_tasks += "\033[K\n";
+        
+        mvaddstr(start_y + 4, start_x, "└─────────┴─────────┴─────────┴─────────┴─────────┴─────────┴─────────┘");
+        
+        attron(A_BOLD);
+        mvprintw(start_y + 6, start_x, "Tasks for %s", selected_date_str.c_str());
+        attroff(A_BOLD);
 
-        out += top_border + mid_names + mid_dates + mid_tasks + bot_border + "\033[K\n";
-        out += lm + "\033[1mTasks for " + selected_date_str + "\033[0m\033[K\n\033[K\n";
-
+        int list_y = start_y + 8;
         auto& tasks = tasks_db[selected_date_str];
+        
         if (tasks.empty()) {
-            out += lm + "\033[90m< No tasks for this day >\033[0m\033[K\n";
+            attron(COLOR_PAIR(CP_GRAY));
+            mvprintw(list_y, start_x, "< No tasks for this day >");
+            attroff(COLOR_PAIR(CP_GRAY));
         } else {
             for (size_t i = 0; i < tasks.size(); ++i) {
                 auto& t = tasks[i];
                 bool selected = (is_task_focused && (int)i == task_sel_idx);
                 std::string prefix = selected ? "> " : "  ";
                 
-                std::string color = "\033[0m"; 
+                int c_pair = CP_NORMAL; 
                 bool overdue = false;
                 
                 int dl = t.has_custom_deadline ? t.deadline_min : (t.start_min + t.duration_min);
@@ -361,10 +338,10 @@ void render_ui(Page current_page, int sel_idx, int sched_sel_c, const std::tm& c
                     overdue = true;
                 }
 
-                if (t.status == 3) color = "\033[90m"; 
-                else if (!t.has_start) color = "\033[37m"; 
-                else if (t.status == 1) color = overdue ? "\033[35m" : "\033[32m"; 
-                else color = overdue ? "\033[31m" : "\033[34m"; 
+                if (t.status == 3) c_pair = CP_GRAY; 
+                else if (!t.has_start) c_pair = CP_NORMAL; 
+                else if (t.status == 1) c_pair = overdue ? CP_MAGENTA : CP_GREEN; 
+                else c_pair = overdue ? CP_RED : CP_BLUE; 
 
                 long long elapsed = get_elapsed_sec(t);
                 double pct = 0.0;
@@ -377,81 +354,106 @@ void render_ui(Page current_page, int sel_idx, int sched_sel_c, const std::tm& c
                 std::string time_str = t.has_start ? format_time_24(t.start_min) : "     ";
                 std::string status_sym = (t.status == 1) ? "[>]" : (t.status == 2) ? "[||]" : (t.status == 3) ? "[v]" : "[ ]";
                 
-                // [MOD] Dùng chữ P thay cho đường phân tách '|' nếu task này đang được gắn Pomodoro
                 bool is_pomo_attached = (is_pomo_active && pomo_task_date == selected_date_str && pomo_task_idx == (int)i);
-                std::string sep = is_pomo_attached ? " P " : " | ";
-
+                std::string sep = is_pomo_attached ? " P " : " │ ";
                 std::string row = prefix + status_sym + " " + time_str + sep + t.name + " [" + std::string(pct_buf) + "]";
-                if (selected) out += lm + "\033[7m" + color + row + "\033[0m\033[K\n";
-                else out += lm + color + row + "\033[0m\033[K\n";
+
+                if (selected) attron(A_REVERSE);
+                attron(COLOR_PAIR(c_pair));
+                
+                mvprintw(list_y + i, start_x, "%s", row.c_str());
+                
+                attroff(COLOR_PAIR(c_pair));
+                if (selected) attroff(A_REVERSE);
             }
         }
 
-        out += "\033[K\n";
+        attron(A_DIM);
         if (is_task_focused) {
-            out += lm + "\033[2m[j/k] Move  [p] Pomodoro  [a] Add  [s] Start/Pause  [d/D] Done/Del  [Enter] Edit  [q] Back\033[0m\033[K\n";
+            mvprintw(list_y + std::max((int)tasks.size(), 1) + 2, start_x, "[j/k] Move  [p] Pomodoro  [a] Add  [s] Start/Pause  [d/D] Done/Del  [Enter] Edit  [q] Back");
         } else {
-            out += lm + "\033[2m[h/l] Change Day  [t] Today  [Enter] Focus Tasks  [a] Add Task  [q] Menu\033[0m\033[K\n";
+            mvprintw(list_y + std::max((int)tasks.size(), 1) + 2, start_x, "[h/l] Change Day  [t] Today  [Enter] Focus Tasks  [a] Add Task  [q] Menu");
         }
+        attroff(A_DIM);
     }
     else if (current_page == Page::TASK_EDIT) {
         int w = 50;
-        int top_pad = std::max(0, (rows - 12) / 2);
-        int left_pad = std::max(0, (cols - w) / 2);
-        std::string lm(left_pad, ' ');
-        for (int i = 0; i < top_pad; ++i) out += "\033[K\n";
+        int start_y = std::max(0, (LINES - 12) / 2);
+        int start_x = std::max(0, (COLS - w) / 2);
+        int cursor_y = 0, cursor_x = 0;
 
         Task& t = tasks_db[selected_date_str][task_sel_idx];
-        out += lm + "\033[1m=== Edit Task ===\033[0m\033[K\n\033[K\n";
+        
+        attron(A_BOLD);
+        mvprintw(start_y, start_x, "=== Edit Task ===");
+        attroff(A_BOLD);
 
-        auto render_field = [&](int idx, std::string label, std::string val) {
-            std::string res = lm;
-            if (edit_sel_idx == idx) res += "\033[7m";
-            res += label + ": ";
+        auto render_field = [&](int idx, std::string label, std::string val, int y_offset) {
+            if (edit_sel_idx == idx) attron(A_REVERSE);
+            mvprintw(start_y + y_offset, start_x, "%s: ", label.c_str());
+            
             if (edit_sel_idx == idx && is_insert_mode) {
-                res += "[" + input_buffer + "\033[s ]";
-            } else res += val;
-            res += "\033[0m\033[K\n";
-            out += res;
+                printw("[%s ]", input_buffer.c_str());
+                getyx(stdscr, cursor_y, cursor_x); // Lưu vị trí con trỏ
+                cursor_x--; 
+            } else {
+                printw("%s", val.c_str());
+            }
+            if (edit_sel_idx == idx) attroff(A_REVERSE);
         };
 
-        render_field(0, "Name           ", t.name);
-        render_field(1, "Description    ", t.desc);
-        render_field(2, "Has Start Time ", t.has_start ? "Yes" : "No (No deadline)");
+        render_field(0, "Name           ", t.name, 2);
+        render_field(1, "Description    ", t.desc, 3);
+        render_field(2, "Has Start Time ", t.has_start ? "Yes" : "No (No deadline)", 4);
         
-        if (t.has_start) render_field(3, "Start Time     ", format_time_24(t.start_min));
-        else out += lm + "\033[90mStart Time     : --:--\033[0m\033[K\n";
+        if (t.has_start) render_field(3, "Start Time     ", format_time_24(t.start_min), 5);
+        else {
+            attron(COLOR_PAIR(CP_GRAY));
+            mvprintw(start_y + 5, start_x, "Start Time     : --:--");
+            attroff(COLOR_PAIR(CP_GRAY));
+        }
         
-        render_field(4, "Duration       ", format_time_24(t.duration_min));
+        render_field(4, "Duration       ", format_time_24(t.duration_min), 6);
         
         if (t.has_start) {
-            render_field(5, "Custom Deadline", t.has_custom_deadline ? "Yes" : "No (Auto: Start+Dur)");
-            if (t.has_custom_deadline) render_field(6, "Deadline Time  ", format_time_24(t.deadline_min));
-            else out += lm + "\033[90mDeadline Time  : " + format_time_24(t.start_min + t.duration_min) + "\033[0m\033[K\n";
+            render_field(5, "Custom Deadline", t.has_custom_deadline ? "Yes" : "No (Auto: Start+Dur)", 7);
+            if (t.has_custom_deadline) render_field(6, "Deadline Time  ", format_time_24(t.deadline_min), 8);
+            else {
+                attron(COLOR_PAIR(CP_GRAY));
+                mvprintw(start_y + 8, start_x, "Deadline Time  : %s", format_time_24(t.start_min + t.duration_min).c_str());
+                attroff(COLOR_PAIR(CP_GRAY));
+            }
         }
 
         long long elapsed = get_elapsed_sec(t);
         int eh = elapsed / 3600;
         int em = (elapsed % 3600) / 60;
         int es = elapsed % 60;
-        char ebuf[64];
-        snprintf(ebuf, sizeof(ebuf), "%02d:%02d:%02d", eh, em, es);
-        out += lm + "\033[90mElapsed Time   : " + std::string(ebuf) + "\033[0m\033[K\n";
+        attron(COLOR_PAIR(CP_GRAY));
+        mvprintw(start_y + 10, start_x, "Elapsed Time   : %02d:%02d:%02d", eh, em, es);
+        attroff(COLOR_PAIR(CP_GRAY));
 
-        out += "\033[K\n" + lm + "\033[2m[i/Enter] Input  [Esc] Normal Mode  [h/l] +/- 5m  [q] Save\033[0m\033[K\n";
+        attron(A_DIM);
+        mvprintw(start_y + 12, start_x, "[i/Enter] Input  [Esc] Normal Mode  [h/l] +/- 5m  [q] Save");
+        attroff(A_DIM);
+        
+        if (is_insert_mode) {
+            move(cursor_y, cursor_x);
+            curs_set(1);
+        }
     }
     else if (current_page == Page::POMODORO) {
         int menu_width = 30;
         int total_height = 4 * 4 - 1;
-        int top_pad = std::max(0, (rows - total_height) / 2);
-        int left_pad = std::max(0, (cols - menu_width - 2) / 2);
-        std::string lm(left_pad, ' ');
-
-        for (int i = 0; i < top_pad; ++i) out += "\033[K\n";
+        int start_y = std::max(0, (LINES - total_height) / 2);
+        int start_x = std::max(0, (COLS - menu_width - 2) / 2);
 
         std::string task_name = tasks_db[pomo_task_date][pomo_task_idx].name;
         if (task_name.length() > 20) task_name = task_name.substr(0, 17) + "...";
-        out += lm + "\033[1mTask: " + task_name + "\033[0m\033[K\n\033[K\n";
+        
+        attron(A_BOLD);
+        mvprintw(start_y - 2, start_x, "Task: %s", task_name.c_str());
+        attroff(A_BOLD);
 
         std::array<std::string, 4> pomo_items = {
             "Start Timer",
@@ -461,35 +463,30 @@ void render_ui(Page current_page, int sel_idx, int sched_sel_c, const std::tm& c
         };
 
         for (int i = 0; i < 4; ++i) {
-            out += draw_box(pomo_items[i], menu_width, (i == sel_idx), lm);
-            if (i < 3) out += "\033[K\n";
+            draw_box_ncurses(start_y + (i * 4), start_x, pomo_items[i], menu_width, (i == sel_idx));
         }
-        out += "\033[K\n" + lm + "\033[2m[q] Back to Schedule\033[0m\033[K\n";
+        
+        attron(A_DIM);
+        mvprintw(start_y + (4 * 4), start_x, "[q] Back to Schedule");
+        attroff(A_DIM);
     }
     else if (current_page == Page::POMODORO_RUN) {
         int bar_w = 40; 
         int block_w = bar_w + 2; 
         int total_height = 8;
-        
-        int top_pad = std::max(0, (rows - total_height) / 2);
-        int left_pad = std::max(0, (cols - block_w) / 2); 
-        std::string lm(left_pad, ' ');
-
-        for (int i = 0; i < top_pad; ++i) out += "\033[K\n";
+        int start_y = std::max(0, (LINES - total_height) / 2);
+        int start_x = std::max(0, (COLS - block_w) / 2);
 
         if (is_eye_break_active) {
             std::string msg1 = "EYE BREAK: LOOK 20 FEET AWAY";
             std::string msg2 = "Resuming in " + std::to_string(eye_break_remaining) + "s";
             
-            int m1_l = std::max(0, (block_w - (int)msg1.length()) / 2);
-            int m1_r = std::max(0, block_w - (int)msg1.length() - m1_l);
-            int m2_l = std::max(0, (block_w - (int)msg2.length()) / 2);
-            int m2_r = std::max(0, block_w - (int)msg2.length() - m2_l);
-
-            out += "\033[K\n\033[K\n";
-            out += lm + std::string(m1_l, ' ') + "\033[36;1m" + msg1 + "\033[0m" + std::string(m1_r, ' ') + "\033[K\n";
-            out += lm + std::string(m2_l, ' ') + "\033[1m" + msg2 + "\033[0m" + std::string(m2_r, ' ') + "\033[K\n\033[K\n";
-            out += "\033[K\n\033[K\n\033[K\n";
+            attron(COLOR_PAIR(CP_CYAN) | A_BOLD);
+            mvprintw(start_y + 2, start_x + (block_w - msg1.length()) / 2, "%s", msg1.c_str());
+            attroff(COLOR_PAIR(CP_CYAN));
+            
+            mvprintw(start_y + 4, start_x + (block_w - msg2.length()) / 2, "%s", msg2.c_str());
+            attroff(A_BOLD);
         } 
         else {
             int total_sec = (is_work_phase ? work_time : break_time) * 60;
@@ -499,72 +496,71 @@ void render_ui(Page current_page, int sel_idx, int sched_sel_c, const std::tm& c
             std::string phase_txt = is_work_phase ? "WORK PHASE" : "BREAK PHASE";
             if (is_pomo_paused) phase_txt += " (PAUSED)";
             
-            std::string color = is_work_phase ? "\033[31;1m" : "\033[32;1m"; 
+            int color = is_work_phase ? CP_RED : CP_GREEN; 
             
             int h = time_remaining / 3600;
             int m = (time_remaining % 3600) / 60;
             int s = time_remaining % 60;
-            char time_buf[16];
-            std::snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02d", h, m, s);
-            std::string time_str = std::string(time_buf);
+            
+            attron(COLOR_PAIR(color) | A_BOLD);
+            mvprintw(start_y, start_x + (block_w - phase_txt.length()) / 2, "%s", phase_txt.c_str());
+            attroff(COLOR_PAIR(color));
+            
+            mvprintw(start_y + 1, start_x + (block_w - 8) / 2, "%02d:%02d:%02d", h, m, s);
+            attroff(A_BOLD);
 
-            int p_l = std::max(0, (block_w - (int)phase_txt.length()) / 2);
-            int p_r = std::max(0, block_w - (int)phase_txt.length() - p_l);
-            int t_l = std::max(0, (block_w - (int)time_str.length()) / 2);
-            int t_r = std::max(0, block_w - (int)time_str.length() - t_l);
+            // [MOD] Thanh Progress Bar nét liền
+            std::string h_line = "";
+            for (int i = 0; i < bar_w; ++i) h_line += "─";
+            
+            mvprintw(start_y + 3, start_x, "┌%s┐", h_line.c_str());
+            
+            mvaddstr(start_y + 4, start_x, "│");
+            attron(COLOR_PAIR(color) | A_REVERSE);
+            for (int i = 0; i < filled_chars; ++i) addch(' ');
+            attroff(A_REVERSE);
+            for (int i = filled_chars; i < bar_w; ++i) addch(' ');
+            attroff(COLOR_PAIR(color));
+            addstr("│");
+            
+            mvprintw(start_y + 5, start_x, "└%s┘", h_line.c_str());
 
-            out += lm + std::string(p_l, ' ') + color + phase_txt + "\033[0m" + std::string(p_r, ' ') + "\033[K\n";
-            out += lm + std::string(t_l, ' ') + "\033[1m" + time_str + "\033[0m" + std::string(t_r, ' ') + "\033[K\n\033[K\n";
-
-            std::string bar_top = "┌"; for(int i=0; i<bar_w; ++i) bar_top += "─"; bar_top += "┐";
-            std::string bar_bot = "└"; for(int i=0; i<bar_w; ++i) bar_bot += "─"; bar_bot += "┘";
-            std::string bar_mid = "│" + color;
-            for (int i = 0; i < filled_chars; ++i) bar_mid += "█";
-            bar_mid += "\033[0m"; 
-            for (int i = filled_chars; i < bar_w; ++i) bar_mid += " ";
-            bar_mid += "│";
-
-            out += lm + bar_top + "\033[K\n";
-            out += lm + bar_mid + "\033[K\n";
-            out += lm + bar_bot + "\033[K\n\033[K\n";
-
-            // [MOD] Phím điều khiển Pomodoro mới
+            attron(A_DIM);
             std::string msg = "[s] Pause/Resume  [c] Cancel  [q] Background";
-            int m_l = std::max(0, (block_w - (int)msg.length()) / 2);
-            int m_r = std::max(0, block_w - (int)msg.length() - m_l);
-            out += lm + std::string(m_l, ' ') + "\033[2m" + msg + "\033[0m" + std::string(m_r, ' ') + "\033[K\n";
+            mvprintw(start_y + 7, start_x + (block_w - msg.length()) / 2, "%s", msg.c_str());
+            attroff(A_DIM);
         }
     }
     else if (current_page == Page::INFO) {
         int info_width = 44;
         int total_height = 8;
-        int top_pad = std::max(0, (rows - total_height) / 2);
-        int left_pad = std::max(0, (cols - info_width) / 2);
-        std::string lm(left_pad, ' ');
+        int start_y = std::max(0, (LINES - total_height) / 2);
+        int start_x = std::max(0, (COLS - info_width) / 2);
 
-        for (int i = 0; i < top_pad; ++i) out += "\033[K\n";
-
-        out += lm + "\033[1m=== MINIMAL TUI INFO ===\033[0m\033[K\n\033[K\n";
-        out += lm + "Navigation : [j / k] Up/Down\033[K\n";
-        out += lm + "Action     : [Enter] Select/Input\033[K\n";
-        out += lm + "Task Keys  : [a] Add [s] Start [d/D] Done/Del\033[K\n";
-        out += lm + "Quit/Back  : [q / ESC]\033[K\n\033[K\n";
-        out += lm + "\033[2mPress [q] to return.\033[0m\033[K\n";
-    }
-
-    out += "\033[J"; 
-    
-    if (current_page == Page::TASK_EDIT && is_insert_mode) {
-        out += "\033[u\033[?25h\033[5 q";
-    } else {
-        out += "\033[?25l";
+        attron(A_BOLD);
+        mvprintw(start_y, start_x, "=== MINIMAL TUI INFO ===");
+        attroff(A_BOLD);
+        
+        mvprintw(start_y + 2, start_x, "Navigation : [j / k] Up/Down or Arrows");
+        mvprintw(start_y + 3, start_x, "Action     : [Enter] Select/Input");
+        mvprintw(start_y + 4, start_x, "Task Keys  : [a] Add [s] Start [d/D] Done/Del");
+        mvprintw(start_y + 5, start_x, "Quit/Back  : [q / ESC]");
+        
+        attron(A_DIM);
+        mvprintw(start_y + 7, start_x, "Press [q] to return.");
+        attroff(A_DIM);
     }
     
-    std::cout << out << std::flush;
+    if (!(current_page == Page::TASK_EDIT && is_insert_mode)) {
+        curs_set(0);
+    }
+
+    refresh(); 
 }
 
 int main() {
-    TerminalSession::init();
+    init_ncurses();
+    std::atexit(cleanup_ncurses);
     load_tasks(); 
 
     Page current_page = Page::MAIN_MENU;
@@ -629,31 +625,21 @@ int main() {
         }
 
         int timeout_ms = 1000;
-        // [MOD] Timeout luôn là 1s nếu Pomodoro đang chạy (để đếm ngược background)
         if (!is_pomo_active && !any_task_running) {
             timeout_ms = (60 - (current_unix % 60)) * 1000;
             if (timeout_ms <= 0) timeout_ms = 1000; 
         }
 
-        struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
-        int ret = poll(&pfd, 1, timeout_ms);
+        timeout(timeout_ms);
+        int key = getch();
 
-        if (ret == -1 && errno == EINTR) {
-            if (g_winch) {
-                g_winch = 0;
-                needs_redraw = true; 
-                continue;
-            }
-        } 
-        else if (ret == 0) {
+        if (key == ERR) {
             if (any_task_running) needs_redraw = true; 
 
-            // [MOD] Pomodoro Background Tick
             if (is_pomo_active && !is_pomo_paused) {
                 if (time_remaining > 0) time_remaining--;
                 session_time_elapsed++;
                 
-                // Trỗi dậy ép xem màn hình Eye Break
                 if (eye_break_enabled && session_time_elapsed > 0 && session_time_elapsed % 1200 == 0) {
                     is_eye_break_active = true;
                     eye_break_remaining = 20;
@@ -689,40 +675,27 @@ int main() {
                         system("notify-send -u critical 'Pomodoro' 'Break phase started!' &");
                     }
                     save_tasks();
-                    std::cout << "\a" << std::flush; 
+                    beep(); 
                 }
                 needs_redraw = true; 
             }
             continue; 
         }
 
-        char key = 0;
-        if (read(STDIN_FILENO, &key, 1) > 0) {
-            needs_redraw = true; 
-            if (key == '\033') { 
-                struct pollfd pfd2 = { STDIN_FILENO, POLLIN, 0 };
-                if (poll(&pfd2, 1, 25) > 0) {
-                    char seq[2];
-                    if (read(STDIN_FILENO, &seq[0], 1) > 0 && read(STDIN_FILENO, &seq[1], 1) > 0) {
-                        if (seq[0] == '[') {
-                            if (seq[1] == 'A') key = 'k';
-                            else if (seq[1] == 'B') key = 'j';
-                            else if (seq[1] == 'C') key = 'l';
-                            else if (seq[1] == 'D') key = 'h';
-                        }
-                    }
-                } else key = 27; 
-            }
+        if (key == KEY_RESIZE) {
+            needs_redraw = true;
+            continue;
         }
 
+        needs_redraw = true; 
         if (key == 3) break; 
 
         if (current_page == Page::MAIN_MENU) {
             if (key == 'q' || key == 27) break;
             switch (key) {
-                case 'k': if (main_sel_r > 0) main_sel_r--; break;
-                case 'j': if (main_sel_r < MENU_SIZE - 1) main_sel_r++; break;
-                case '\r': case '\n': case ' ':
+                case 'k': case KEY_UP: if (main_sel_r > 0) main_sel_r--; break;
+                case 'j': case KEY_DOWN: if (main_sel_r < MENU_SIZE - 1) main_sel_r++; break;
+                case '\r': case '\n': case KEY_ENTER: case ' ':
                     if (main_sel_r == 0) { current_page = Page::SCHEDULE; is_task_focused = false; }
                     else if (main_sel_r == 1) current_page = Page::INFO;
                     break;
@@ -731,11 +704,11 @@ int main() {
         else if (current_page == Page::SCHEDULE) {
             if (!is_task_focused) { 
                 if (key == 'q' || key == 27) current_page = Page::MAIN_MENU;
-                else if (key == 'h') {
+                else if (key == 'h' || key == KEY_LEFT) {
                     if (sched_sel_c > 0) sched_sel_c--;
                     else { sched_sel_c = 6; current_week_sun = add_days(current_week_sun, -7); }
                 }
-                else if (key == 'l') {
+                else if (key == 'l' || key == KEY_RIGHT) {
                     if (sched_sel_c < 6) sched_sel_c++;
                     else { sched_sel_c = 0; current_week_sun = add_days(current_week_sun, 7); }
                 }
@@ -743,7 +716,7 @@ int main() {
                     current_week_sun = add_days(*now, -now->tm_wday);
                     sched_sel_c = now->tm_wday;
                 }
-                else if (key == '\r' || key == '\n' || key == ' ') {
+                else if (key == '\r' || key == '\n' || key == KEY_ENTER || key == ' ') {
                     if (!tasks_db[selected_date_str].empty()) {
                         is_task_focused = true;
                         task_sel_idx = 0;
@@ -763,10 +736,10 @@ int main() {
                 if (key == 'q' || key == 27) {
                     is_task_focused = false;
                 }
-                else if (key == 'j') {
+                else if (key == 'j' || key == KEY_DOWN) {
                     if (task_sel_idx < (int)tasks_db[selected_date_str].size() - 1) task_sel_idx++;
                 }
-                else if (key == 'k') {
+                else if (key == 'k' || key == KEY_UP) {
                     if (task_sel_idx > 0) task_sel_idx--;
                 }
                 else if (key == 'a') {
@@ -779,7 +752,7 @@ int main() {
                     is_insert_mode = true;
                     input_buffer = "";
                 }
-                else if (key == '\r' || key == '\n') {
+                else if (key == '\r' || key == '\n' || key == KEY_ENTER) {
                     if (!tasks_db[selected_date_str].empty()) {
                         current_page = Page::TASK_EDIT;
                         edit_sel_idx = 0;
@@ -798,7 +771,6 @@ int main() {
                     }
                 }
                 else if (key == 's') { 
-                    // [MOD] Start/Pause Task từ ngoài Schedule đồng thời điều hướng cả Pomodoro
                     if (!tasks_db[selected_date_str].empty()) {
                         Task& t = tasks_db[selected_date_str][task_sel_idx];
                         if (t.status == 0 || t.status == 2) {
@@ -865,7 +837,7 @@ int main() {
                 if (key == 27) { 
                     is_insert_mode = false;
                 }
-                else if (key == '\r' || key == '\n') { 
+                else if (key == '\r' || key == '\n' || key == KEY_ENTER) { 
                     is_insert_mode = false;
                     if (edit_sel_idx == 0 && !input_buffer.empty()) t.name = input_buffer;
                     if (edit_sel_idx == 1) t.desc = input_buffer;
@@ -873,7 +845,7 @@ int main() {
                     if (edit_sel_idx == 4) t.duration_min = parse_smart_time(input_buffer, t.duration_min);
                     if (edit_sel_idx == 6) t.deadline_min = parse_smart_time(input_buffer, t.deadline_min);
                 } 
-                else if (key == 127 || key == '\b') { 
+                else if (key == KEY_BACKSPACE || key == 127 || key == '\b') { 
                     if (!input_buffer.empty()) {
                         while (!input_buffer.empty() && (input_buffer.back() & 0xC0) == 0x80) {
                             input_buffer.pop_back();
@@ -881,8 +853,8 @@ int main() {
                         if (!input_buffer.empty()) input_buffer.pop_back();
                     }
                 } 
-                else if (isprint(key)) {
-                    input_buffer += key;
+                else if (key >= 32 && key <= 255) { 
+                    input_buffer += (char)key;
                 }
             } 
             else { 
@@ -891,8 +863,8 @@ int main() {
                     current_page = Page::SCHEDULE;
                     is_task_focused = true; 
                 }
-                else if (key == 'j') { if (edit_sel_idx < max_fields - 1) edit_sel_idx++; }
-                else if (key == 'k') { if (edit_sel_idx > 0) edit_sel_idx--; }
+                else if (key == 'j' || key == KEY_DOWN) { if (edit_sel_idx < max_fields - 1) edit_sel_idx++; }
+                else if (key == 'k' || key == KEY_UP) { if (edit_sel_idx > 0) edit_sel_idx--; }
                 else if (key == 'i') { 
                     if (edit_sel_idx == 0) { is_insert_mode = true; input_buffer = t.name; }
                     if (edit_sel_idx == 1) { is_insert_mode = true; input_buffer = t.desc; }
@@ -900,13 +872,13 @@ int main() {
                     if (edit_sel_idx == 4) { is_insert_mode = true; input_buffer = ""; }
                     if (edit_sel_idx == 6) { is_insert_mode = true; input_buffer = ""; }
                 }
-                else if (key == '\r' || key == '\n') {
+                else if (key == '\r' || key == '\n' || key == KEY_ENTER) {
                     if (edit_sel_idx == 2) { t.has_start = !t.has_start; }
                     if (edit_sel_idx == 5) { t.has_custom_deadline = !t.has_custom_deadline; }
                 }
-                else if (key == 'h' || key == 'H' || key == 'l' || key == 'L') {
-                    int delta = (key == 'h' || key == 'l') ? 5 : 60;
-                    int sign = (key == 'h' || key == 'H') ? -1 : 1;
+                else if (key == 'h' || key == 'H' || key == 'l' || key == 'L' || key == KEY_LEFT || key == KEY_RIGHT) {
+                    int delta = (key == 'h' || key == 'l' || key == KEY_LEFT || key == KEY_RIGHT) ? 5 : 60;
+                    int sign = (key == 'h' || key == 'H' || key == KEY_LEFT) ? -1 : 1;
                     int shift = delta * sign;
                     
                     if (edit_sel_idx == 3) { t.start_min = std::max(0, t.start_min + shift); }
@@ -919,17 +891,17 @@ int main() {
             if (key == 'q' || key == 27) current_page = Page::SCHEDULE;
             else {
                 switch (key) {
-                    case 'k': if (pomo_sel > 0) pomo_sel--; break;
-                    case 'j': if (pomo_sel < 3) pomo_sel++; break;
-                    case 'h': 
+                    case 'k': case KEY_UP: if (pomo_sel > 0) pomo_sel--; break;
+                    case 'j': case KEY_DOWN: if (pomo_sel < 3) pomo_sel++; break;
+                    case 'h': case KEY_LEFT: 
                         if (pomo_sel == 1 && work_time > 1) work_time--;
                         if (pomo_sel == 2 && break_time > 1) break_time--;
                         break;
-                    case 'l': 
+                    case 'l': case KEY_RIGHT: 
                         if (pomo_sel == 1 && work_time < 99) work_time++;
                         if (pomo_sel == 2 && break_time < 99) break_time++;
                         break;
-                    case '\r': case '\n': case ' ':
+                    case '\r': case '\n': case KEY_ENTER: case ' ':
                         if (pomo_sel == 0) { 
                             if (is_pomo_active && (pomo_task_date != selected_date_str || pomo_task_idx != task_sel_idx)) {
                                  Task& old_t = tasks_db[pomo_task_date][pomo_task_idx];
@@ -963,11 +935,9 @@ int main() {
         }
         else if (current_page == Page::POMODORO_RUN) {
             if (key == 'q' || key == 27) {
-                // [MOD] Ẩn Pomodoro xuống background để trở về Schedule (Không hủy)
                 current_page = Page::SCHEDULE; 
             }
             else if (key == 's') {
-                // [MOD] Pause/Resume độc lập ngay trong màn hình Pomodoro
                 is_pomo_paused = !is_pomo_paused;
                 Task& t = tasks_db[pomo_task_date][pomo_task_idx];
                 if (is_pomo_paused) {
@@ -985,7 +955,6 @@ int main() {
                 save_tasks();
             }
             else if (key == 'c') {
-                // [MOD] Chủ động Hủy Pomodoro hoàn toàn
                 is_pomo_active = false;
                 Task& t = tasks_db[pomo_task_date][pomo_task_idx];
                 if (t.status == 1) {
@@ -998,7 +967,7 @@ int main() {
             }
         }
         else if (current_page == Page::INFO) {
-            if (key == 'q' || key == 27 || key == '\r' || key == '\n') current_page = Page::MAIN_MENU;
+            if (key == 'q' || key == 27 || key == '\r' || key == '\n' || key == KEY_ENTER) current_page = Page::MAIN_MENU;
         }
     }
 

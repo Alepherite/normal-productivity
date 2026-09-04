@@ -1,7 +1,7 @@
-TARGET = my_tui_app
+TARGET = normal-productivity
 CXX = g++
 CXXFLAGS = -std=c++17 -O3 -Wall -Wextra
-LIBS = 
+LIBS = -lncursesw 
 
 SRC = src/main.cpp
 BUILD_DIR = build
