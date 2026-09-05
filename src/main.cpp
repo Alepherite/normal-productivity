@@ -12,6 +12,7 @@
 #include <fstream>
 #include <map>
 #include <clocale>
+#include <cstdio> 
 
 #include <ncurses.h>
 #include "json.hpp"
@@ -52,7 +53,7 @@ struct Task {
     long long last_start_timestamp = 0;
     bool is_notified = false;
 
-    // Recurring Properties (Flat Series Architecture)
+    // Recurring Properties
     std::string series_id = "";
     int repeat_type = 0;         // 0: None, 1: Interval, 2: Weekly, 3: After Done
     std::string repeat_val = ""; 
@@ -66,7 +67,7 @@ int edit_sel_idx = 0;
 bool is_insert_mode = false;
 std::string input_buffer = "";
 int next_task_id = 1;
-Task original_task_state; // Dùng để Dirty Check
+Task original_task_state;
 
 // Pomodoro State
 std::string pomo_task_date = "";
@@ -103,6 +104,16 @@ void cleanup_ncurses() { endwin(); }
 
 // ---------------------------------------------------------
 // Core Helpers
+std::string sanitize_for_shell(const std::string& input) {
+    std::string safe = input;
+    size_t pos = 0;
+    while ((pos = safe.find('\'', pos)) != std::string::npos) {
+        safe.replace(pos, 1, "'\\''");
+        pos += 4;
+    }
+    return safe;
+}
+
 std::string generate_series_id() {
     auto now = std::time(nullptr);
     int r = std::rand() % 10000;
@@ -135,7 +146,8 @@ std::tm string_to_tm(const std::string& date_str) {
     sscanf(date_str.c_str(), "%d-%d-%d", &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
     tm.tm_year -= 1900;
     tm.tm_mon -= 1;
-    tm.tm_hour = 12; // Tránh lệch múi giờ
+    tm.tm_hour = 12; // Vẫn giữ nguyên 12h để tránh nhảy ngày
+    tm.tm_isdst = -1;
     std::mktime(&tm);
     return tm;
 }
@@ -150,7 +162,12 @@ int parse_smart_time(const std::string& buf, int fallback) {
         sscanf(buf.c_str(), "%d %d", &h, &m);
         return h * 60 + m;
     } else {
-        try { return std::stoi(buf); } 
+        try { 
+            int val = std::stoi(buf); 
+            // Tính năng QoL "Gõ 14 hiểu là 14:00"
+            if (val <= 24 && buf.length() <= 2) return val * 60;
+            return val; 
+        } 
         catch(...) { return fallback; }
     }
 }
@@ -191,8 +208,15 @@ void save_tasks() {
         }
         j[date] = j_tasks;
     }
-    std::ofstream out(get_data_file());
-    out << j.dump(2);
+    
+    std::string real_path = get_data_file();
+    std::string tmp_path = real_path + ".tmp";
+    std::ofstream out(tmp_path);
+    if (out.is_open()) {
+        out << j.dump(2);
+        out.close();
+        rename(tmp_path.c_str(), real_path.c_str());
+    }
 }
 
 void load_tasks() {
@@ -268,8 +292,9 @@ void spawn_future_tasks(const std::string& start_date, const Task& tmpl) {
     int interval = 1;
     std::vector<int> week_days;
 
+    // [FIX LỖI 2] Interval tàng hình: Parse thẳng sang số nguyên, không dùng parse_smart_time
     if (tmpl.repeat_type == 1) {
-        interval = parse_smart_time(tmpl.repeat_val, 1);
+        try { interval = std::stoi(tmpl.repeat_val); } catch(...) { interval = 1; }
         if (interval <= 0) interval = 1;
     } else if (tmpl.repeat_type == 2) {
         std::string s = tmpl.repeat_val.empty() ? std::to_string(curr_tm.tm_wday) : tmpl.repeat_val;
@@ -282,7 +307,7 @@ void spawn_future_tasks(const std::string& start_date, const Task& tmpl) {
         if (week_days.empty()) week_days.push_back(curr_tm.tm_wday);
     }
 
-    for (int i = 1; i <= 30; ++i) { // Window 30 ngày
+    for (int i = 1; i <= 30; ++i) { 
         std::tm next_tm = add_days(curr_tm, i);
         std::string next_date = format_date(next_tm);
         bool should_spawn = false;
@@ -489,7 +514,7 @@ void render_ui(Page current_page, int sel_idx, int sched_sel_c, const std::tm& c
             attron(COLOR_PAIR(CP_CYAN) | A_BOLD); mvprintw(start_y + 2, start_x + (block_w - msg1.length()) / 2, "%s", msg1.c_str()); attroff(COLOR_PAIR(CP_CYAN));
             mvprintw(start_y + 4, start_x + (block_w - msg2.length()) / 2, "%s", msg2.c_str()); attroff(A_BOLD);
         } else {
-            int total_sec = (is_work_phase ? work_time : break_time) * 60;
+            int total_sec = std::max(1, (is_work_phase ? work_time : break_time) * 60); 
             float progress = 1.0f - ((float)time_remaining / total_sec); 
             int filled_chars = std::max(0, std::min(bar_w, (int)(progress * bar_w))); 
             std::string phase_txt = is_work_phase ? "WORK PHASE" : "BREAK PHASE";
@@ -513,15 +538,69 @@ void render_ui(Page current_page, int sel_idx, int sched_sel_c, const std::tm& c
         }
     }
     else if (current_page == Page::INFO) {
-        int info_width = 44; int total_height = 8;
-        int start_y = std::max(0, (LINES - total_height) / 2); int start_x = std::max(0, (COLS - info_width) / 2);
-        attron(A_BOLD); mvprintw(start_y, start_x, "=== MINIMAL TUI INFO ==="); attroff(A_BOLD);
-        mvprintw(start_y + 2, start_x, "Navigation : [j / k] Up/Down or Arrows");
-        mvprintw(start_y + 3, start_x, "Action     : [Enter] Select/Input");
-        mvprintw(start_y + 4, start_x, "Task Keys  : [a] Add [s] Start [d/D] Done/Del");
-        mvprintw(start_y + 5, start_x, "Quit/Back  : [q / ESC]");
-        attron(A_DIM); mvprintw(start_y + 7, start_x, "Press [q] to return."); attroff(A_DIM);
+        int info_w = 64; 
+        // [ĐÃ CHỈNH SỬA] Tăng chiều cao (info_h) lên 24 để không bị lẹm chữ vào dòng cuối
+        int info_h = 24;
+        int start_y = std::max(0, (LINES - info_h) / 2); 
+        int start_x = std::max(0, (COLS - info_w) / 2);
+
+        // Vẽ viền modal box cho trang Info
+        std::string h_line = ""; for (int i = 0; i < info_w; ++i) h_line += "─";
+        mvprintw(start_y, start_x, "┌%s┐", h_line.c_str());
+        for (int i = 1; i < info_h; ++i) mvprintw(start_y + i, start_x, "│%*s│", info_w, "");
+        mvprintw(start_y + info_h, start_x, "└%s┘", h_line.c_str());
+
+        // Tiêu đề
+        attron(A_BOLD | COLOR_PAIR(CP_SELECTED));
+        mvprintw(start_y + 1, start_x + (info_w - 20) / 2, " MANUAL & KEYBINDS ");
+        attroff(A_BOLD | COLOR_PAIR(CP_SELECTED));
+
+        int cur_y = start_y + 3;
+
+        // Lambda helper in các section
+        auto print_section = [&](const std::string& title) {
+            attron(A_BOLD | COLOR_PAIR(CP_CYAN));
+            mvprintw(cur_y++, start_x + 3, "%s", title.c_str());
+            attroff(A_BOLD | COLOR_PAIR(CP_CYAN));
+        };
+
+        // Lambda helper in keybind
+        auto print_key = [&](const std::string& keys, const std::string& desc) {
+            attron(COLOR_PAIR(CP_MAGENTA));
+            mvprintw(cur_y, start_x + 5, "%-16s", keys.c_str());
+            attroff(COLOR_PAIR(CP_MAGENTA));
+            mvprintw(cur_y++, start_x + 21, ": %s", desc.c_str());
+        };
+
+        // Render nội dung
+        print_section("[ Navigation & General ]");
+        print_key("j / k", "Move Up / Down in lists");
+        print_key("Enter / Space", "Select / Confirm / Focus");
+        print_key("q / ESC", "Go Back / Exit menu / Quit app");
+        cur_y++;
+
+        print_section("[ Schedule & Task List ]");
+        print_key("h / l", "Change Day (Prev / Next)");
+        print_key("t", "Jump to Today");
+        print_key("a", "Add a new task");
+        print_key("s", "Start / Pause focused task");
+        print_key("d / D", "Mark Done / Skip (Delete)");
+        print_key("X", "Delete entire recurring series");
+        print_key("p", "Attach Pomodoro timer to task");
+        cur_y++;
+
+        print_section("[ Task Editor & Pomodoro ]");
+        print_key("i / Enter", "Edit text field / Toggle options");
+        print_key("h/H or l/L", "Decrease / Increase time values");
+        print_key("s / c (Pomo)", "Pause / Cancel Pomodoro session");
+
+        // Hướng dẫn thoát ở dưới cùng
+        attron(A_DIM); 
+        std::string footer = "Press [q] or [ESC] to return";
+        mvprintw(start_y + info_h - 1, start_x + (info_w - footer.length()) / 2, "%s", footer.c_str()); 
+        attroff(A_DIM);
     }
+    // [EDIT] Kết thúc phần chỉnh sửa
     if (!(current_page == Page::TASK_EDIT && is_insert_mode)) curs_set(0);
     refresh(); 
 }
@@ -559,13 +638,25 @@ int main() {
         if (now_min != last_min) {
             last_min = now_min;
             needs_redraw = true; 
-            if (tasks_db.count(today_str)) {
-                for (auto& task : tasks_db[today_str]) {
-                    if (task.has_start && task.status == 0 && !task.is_notified) {
-                        if (now_min >= task.start_min) {
-                            task.is_notified = true;
-                            std::string cmd = "notify-send -u critical 'Task Reminder' 'Time to work: " + task.name + "' &";
-                            system(cmd.c_str());
+            
+            std::vector<std::string> check_dates = { format_date(add_days(*now, -1)), today_str };
+            for (const auto& d_key : check_dates) {
+                if (tasks_db.count(d_key)) {
+                    for (auto& task : tasks_db[d_key]) {
+                        if (task.has_start && task.status == 0 && !task.is_notified) {
+                            std::tm date_tm = string_to_tm(d_key);
+                            // [FIX LỖI 1] Cần set cứng về 0h sáng trước khi ráp phút vào Unix Epoch
+                            date_tm.tm_hour = 0;
+                            date_tm.tm_min = 0;
+                            date_tm.tm_sec = 0;
+                            long long task_epoch = std::mktime(&date_tm) + task.start_min * 60;
+                            
+                            if (current_unix >= task_epoch && current_unix - task_epoch < 7200) {
+                                task.is_notified = true;
+                                std::string safe_name = sanitize_for_shell(task.name);
+                                std::string cmd = "notify-send -u critical 'Task Reminder' 'Time to work: " + safe_name + "' &";
+                                system(cmd.c_str());
+                            }
                         }
                     }
                 }
@@ -574,6 +665,20 @@ int main() {
 
         std::tm target_day = add_days(current_week_sun, sched_sel_c);
         selected_date_str = format_date(target_day);
+
+        static std::string last_extended_date = "";
+        if (selected_date_str != last_extended_date) {
+            last_extended_date = selected_date_str;
+            
+            std::map<std::string, Task> active_series;
+            for (const auto& [date, tasks] : tasks_db) {
+                if (date > selected_date_str) break; 
+                for (const auto& t : tasks) {
+                    if (!t.series_id.empty() && t.repeat_type > 0 && t.status != 4) active_series[t.series_id] = t;
+                }
+            }
+            for (const auto& [s_id, tmpl] : active_series) spawn_future_tasks(selected_date_str, tmpl);
+        }
 
         if (needs_redraw) {
             render_ui(current_page, (current_page == Page::MAIN_MENU) ? main_sel_r : (current_page == Page::POMODORO ? pomo_sel : task_sel_idx), 
@@ -589,19 +694,18 @@ int main() {
             if (any_task_running) break;
         }
 
-        // [OPTIMIZATION] Smart Polling cho Wayland: Tiết kiệm tài nguyên tuyệt đối
         int timeout_ms = -1;
         if (is_pomo_active || any_task_running) {
-            timeout_ms = 1000; // Cập nhật mỗi 1 giây khi có activity
+            timeout_ms = 1000;
         } else {
-            timeout_ms = (60 - (current_unix % 60)) * 1000; // Ngủ cho đến phút tiếp theo
+            timeout_ms = (60 - (current_unix % 60)) * 1000; 
             if (timeout_ms <= 0) timeout_ms = 60000; 
         }
 
         timeout(timeout_ms);
         int key = getch();
 
-        if (key == ERR) { // Timeout trigger
+        if (key == ERR) {
             if (any_task_running) needs_redraw = true; 
 
             if (is_pomo_active && !is_pomo_paused) {
@@ -677,7 +781,7 @@ int main() {
                     Task new_t; new_t.id = next_task_id++;
                     tasks_db[selected_date_str].push_back(new_t);
                     current_page = Page::TASK_EDIT; task_sel_idx = tasks_db[selected_date_str].size() - 1;
-                    original_task_state = new_t; // [ADD] Snapshot for dirty check
+                    original_task_state = new_t;
                     edit_sel_idx = 0; is_insert_mode = true; input_buffer = "";
                 }
             } else { 
@@ -688,13 +792,13 @@ int main() {
                     Task new_t; new_t.id = next_task_id++;
                     tasks_db[selected_date_str].push_back(new_t);
                     current_page = Page::TASK_EDIT; task_sel_idx = tasks_db[selected_date_str].size() - 1;
-                    original_task_state = new_t; // [ADD] Snapshot for dirty check
+                    original_task_state = new_t;
                     edit_sel_idx = 0; is_insert_mode = true; input_buffer = "";
                 }
                 else if (key == '\r' || key == '\n' || key == KEY_ENTER) {
                     if (!tasks_db[selected_date_str].empty()) {
                         current_page = Page::TASK_EDIT;
-                        original_task_state = tasks_db[selected_date_str][task_sel_idx]; // [ADD] Snapshot for dirty check
+                        original_task_state = tasks_db[selected_date_str][task_sel_idx];
                         edit_sel_idx = 0;
                     }
                 }
@@ -713,6 +817,9 @@ int main() {
                         Task& t = tasks_db[selected_date_str][task_sel_idx];
                         if (t.status == 0 || t.status == 2) {
                             t.status = 1; t.last_start_timestamp = std::time(nullptr);
+                            // [FIX LỖI 3] Thêm notification khi bạn thủ công bấm Start 
+                            system(("notify-send -u low 'Task Started' 'Working on: " + sanitize_for_shell(t.name) + "' &").c_str());
+                            
                             if (is_pomo_active && pomo_task_date == selected_date_str && pomo_task_idx == task_sel_idx) {
                                 is_pomo_paused = false;
                                 if (!is_work_phase) { is_work_phase = true; time_remaining = work_time * 60; session_time_elapsed = 0; }
@@ -741,7 +848,11 @@ int main() {
                         t.status = 3; 
 
                         if (t.repeat_type == 3 && !t.series_id.empty()) {
-                            int n_days = parse_smart_time(t.repeat_val, 1); if (n_days <= 0) n_days = 1;
+                            // [FIX LỖI 2] Bịt nốt lỗ hổng parser Interval ở tính năng repeat After Done
+                            int n_days = 1; 
+                            try { n_days = std::stoi(t.repeat_val); } catch(...) { n_days = 1; } 
+                            if (n_days <= 0) n_days = 1;
+                            
                             std::time_t current_unix = std::time(nullptr); std::tm real_today = *std::localtime(&current_unix);
                             std::tm target_tm = add_days(real_today, n_days); std::string target_str = format_date(target_tm);
                             
@@ -818,22 +929,28 @@ int main() {
                             attroff(COLOR_PAIR(CP_SELECTED));
                             refresh();
                             
-                            timeout(-1); // Block hoàn toàn đếm ngược để đợi phím
+                            std::time_t wait_start = std::time(nullptr);
+                            timeout(-1); 
                             int ans;
                             while (true) {
                                 ans = getch();
                                 if (ans == 'y' || ans == 'Y' || ans == 'n' || ans == 'N' || ans == 27 || ans == '\n' || ans == '\r') break;
                             }
+                            if (is_pomo_active && !is_pomo_paused) {
+                                int time_passed = (int)(std::time(nullptr) - wait_start);
+                                time_remaining -= time_passed;
+                                session_time_elapsed += time_passed;
+                                if (time_remaining < 0) time_remaining = 0;
+                            }
                             
                             if (ans == 'y' || ans == 'Y') { apply_changes_to_future_series(t, selected_date_str); }
-                            else { t.series_id = generate_series_id(); } // Cắt đứt huyết thống
+                            else { t.series_id = generate_series_id(); } 
                         } else if (t.repeat_type != 0) {
                             t.series_id = generate_series_id(); 
                         }
                         spawn_future_tasks(selected_date_str, t);
                     } 
                     else if (t.name == "New Task" && t.repeat_type == 0 && t.desc == "") {
-                        // Tự dọn dẹp task rỗng nếu lỡ ấn Edit rồi thoát ngay
                         tasks_db[selected_date_str].erase(tasks_db[selected_date_str].begin() + task_sel_idx);
                         if (tasks_db[selected_date_str].empty()) is_task_focused = false;
                         else if (task_sel_idx >= (int)tasks_db[selected_date_str].size()) task_sel_idx--;
