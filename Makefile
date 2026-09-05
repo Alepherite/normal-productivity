@@ -1,7 +1,7 @@
 TARGET = normal-productivity
 CXX = g++
 CXXFLAGS = -std=c++17 -O3 -Wall -Wextra
-LIBS = -lncursesw 
+LIBS = -lncursesw -lsqlite3
 
 SRC = src/main.cpp
 BUILD_DIR = build
