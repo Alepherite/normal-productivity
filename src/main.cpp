@@ -14,7 +14,7 @@
 #include <cstdio> 
 
 #include <ncurses.h>
-#include <sqlite3.h> // [CHỈNH SỬA] Thay json bằng sqlite3
+#include <sqlite3.h>
 
 #define CP_NORMAL   1
 #define CP_SELECTED 2
@@ -30,9 +30,8 @@ enum class Page { MAIN_MENU, SCHEDULE, POMODORO, POMODORO_RUN, INFO, TASK_EDIT }
 const int MENU_SIZE = 2;
 const std::array<std::string, MENU_SIZE> MENU_ITEMS = { "Schedule", "Info" };
 
-// [CHỈNH SỬA] Xóa TimeInterval array vì dùng SQLite lưu elapsed_sec trực tiếp sẽ siêu nhanh và phẳng
 struct Task {
-    int id = 0; // id = 0 nghĩa là task chưa được lưu vào DB (New Task)
+    int id = 0; 
     std::string name = "New Task";
     std::string desc = "";
     bool has_start = true;
@@ -43,19 +42,19 @@ struct Task {
     int status = 0; // 0: Todo, 1: Running, 2: Paused, 3: Done, 4: Skipped
     
     long long last_start_timestamp = 0;
-    long long elapsed_sec = 0; // [CHỈNH SỬA] Thay thế cho mảng intervals
+    long long elapsed_sec = 0; 
     bool is_notified = false;
 
     // Recurring Properties
     int repeat_type = 0;         // 0: None, 1: Interval, 2: Weekly, 3: After Done
     std::string repeat_val = ""; 
-    std::string created_date = ""; // [CHỈNH SỬA] Ngày "Khai sinh" của chuỗi rule
-    std::string until_date = "";   // [CHỈNH SỬA] Ngày chuỗi kết thúc (để cắt lịch sử)
+    std::string created_date = ""; 
+    std::string until_date = "";   
 };
 
 // Global State
 sqlite3* db;
-std::map<std::string, std::vector<Task>> tasks_db; // Giữ nguyên để phục vụ UI, nhưng là data ảo (Virtual)
+std::map<std::string, std::vector<Task>> tasks_db; 
 std::string selected_date_str = "";
 int task_sel_idx = 0;
 int edit_sel_idx = 0;
@@ -66,13 +65,13 @@ Task original_task_state;
 // Pomodoro State
 std::string pomo_task_date = "";
 int pomo_task_idx = -1;
-int pomo_task_id = -1; // [CHỈNH SỬA] Lưu ID thực của task để làm mỏ neo chống văng mảng (Vector Shift)
+int pomo_task_id = -1; // Anchor ID against vector shift
 int session_time_elapsed = 0;
 bool is_eye_break_active = false;
 int eye_break_remaining = 0;
 bool is_pomo_active = false; 
 bool is_pomo_paused = false;
-long long pomo_last_tick = 0; // [CHỈNH SỬA] Lưu mốc thời gian để tránh trôi và xử lý lỗi khi gập máy (sleep)
+long long pomo_last_tick = 0; 
 
 // ---------------------------------------------------------
 void init_ncurses() {
@@ -98,7 +97,7 @@ void init_ncurses() {
 
 void cleanup_ncurses() { 
     endwin(); 
-    if (db) sqlite3_close(db); // Đóng DB khi thoát
+    if (db) sqlite3_close(db); 
 }
 
 // ---------------------------------------------------------
@@ -172,6 +171,7 @@ bool is_same_day(const std::tm& d1, const std::tm& d2) { return (d1.tm_year == d
 
 long long get_elapsed_sec(const Task& t) {
     long long total = t.elapsed_sec;
+    // Continuous time logic: freely accrue elapsed time based on last timestamp
     if (t.status == 1 && t.last_start_timestamp > 0) {
         long long now = std::time(nullptr);
         if (now > t.last_start_timestamp) total += (now - t.last_start_timestamp);
@@ -180,21 +180,19 @@ long long get_elapsed_sec(const Task& t) {
 }
 
 // ---------------------------------------------------------
-// [KIẾN TRÚC MỚI] SQLITE DATABASE LOGIC
+// SQLite Integration
 void init_db() {
     std::string path = std::string(getenv("HOME")) + "/.local/normal-productivity";
     mkdir(path.c_str(), 0777);
     std::string db_path = path + "/tasks.db";
     sqlite3_open(db_path.c_str(), &db);
 
-    // Bảng 1: Khuôn đúc luật lặp (Chỉ chứa rule)
     const char* sql_series = 
         "CREATE TABLE IF NOT EXISTS series ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, desc TEXT, has_start INT, "
         "start_min INT, duration_min INT, has_custom_deadline INT, deadline_min INT, "
         "repeat_type INT, repeat_val TEXT, created_date TEXT, until_date TEXT);";
     
-    // Bảng 2: Thực thể / Ngoại lệ (Chứa status, tiến độ theo từng ngày cụ thể)
     const char* sql_instances = 
         "CREATE TABLE IF NOT EXISTS instances ("
         "series_id INT, date_str TEXT, status INT, last_start INT, elapsed_sec INT, is_notified INT, "
@@ -204,7 +202,6 @@ void init_db() {
     sqlite3_exec(db, sql_instances, 0, 0, 0);
 }
 
-// Lưu các thuộc tính Core vào khuôn
 void insert_series(Task& t) {
     std::string sql = "INSERT INTO series (name, desc, has_start, start_min, duration_min, has_custom_deadline, deadline_min, repeat_type, repeat_val, created_date, until_date) "
                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
@@ -223,7 +220,7 @@ void insert_series(Task& t) {
     sqlite3_bind_text(stmt, 11, t.until_date.c_str(), -1, SQLITE_TRANSIENT);
     
     sqlite3_step(stmt);
-    t.id = sqlite3_last_insert_rowid(db); // Lấy ID vừa tạo
+    t.id = sqlite3_last_insert_rowid(db); 
     sqlite3_finalize(stmt);
 }
 
@@ -246,9 +243,8 @@ void update_series(const Task& t) {
     sqlite3_finalize(stmt);
 }
 
-// Cập nhật trạng thái của 1 task trong 1 ngày cụ thể (UPSERT)
 void save_instance(const Task& t, const std::string& date) {
-    if (t.id == 0) return; // Chưa được tạo khuôn thì không lưu instance
+    if (t.id == 0) return; 
     std::string sql = "INSERT INTO instances (series_id, date_str, status, last_start, elapsed_sec, is_notified) VALUES (?, ?, ?, ?, ?, ?) "
                       "ON CONFLICT(series_id, date_str) DO UPDATE SET "
                       "status=excluded.status, last_start=excluded.last_start, elapsed_sec=excluded.elapsed_sec, is_notified=excluded.is_notified;";
@@ -264,19 +260,19 @@ void save_instance(const Task& t, const std::string& date) {
     sqlite3_finalize(stmt);
 }
 
-// [CHỈNH SỬA] Thuật toán chiếu bóng (Virtual Task Projection)
-void load_tasks() {
+// Virtual Task Projection
+void load_tasks(const std::tm& focus_date) {
     tasks_db.clear();
     
-    // Bước 1: Kéo tất cả "Khuôn đúc" từ DB
+    // Performance limit: Only project tasks within a -30 to +60 days window
+    std::tm window_start = add_days(focus_date, -30);
+    std::tm window_end = add_days(focus_date, 60);
+    std::string limit_future = format_date(window_end); 
+    
     const char* q_series = "SELECT * FROM series;";
     sqlite3_stmt* stmt;
     sqlite3_prepare_v2(db, q_series, -1, &stmt, 0);
     
-    std::time_t current_unix = std::time(nullptr);
-    std::tm today_tm = *std::localtime(&current_unix);
-    std::string limit_future = format_date(add_days(today_tm, 730)); // Limit chiếu bóng 2 năm để tránh vô hạn
-
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         Task tmpl;
         tmpl.id = sqlite3_column_int(stmt, 0);
@@ -293,10 +289,9 @@ void load_tasks() {
         const char* ud = (const char*)sqlite3_column_text(stmt, 11);
         tmpl.until_date = ud ? std::string(ud) : "";
 
-        std::string end_limit = tmpl.until_date.empty() ? limit_future : tmpl.until_date;
+        std::string end_limit = (tmpl.until_date.empty() || tmpl.until_date > limit_future) ? limit_future : tmpl.until_date;
         std::tm curr_tm = string_to_tm(tmpl.created_date);
 
-        // Parser luật lặp
         int interval = 1; std::vector<int> week_days;
         if (tmpl.repeat_type == 1) {
             try { interval = std::stoi(tmpl.repeat_val); } catch(...) { interval = 1; }
@@ -312,14 +307,15 @@ void load_tasks() {
             if (week_days.empty()) week_days.push_back(curr_tm.tm_wday);
         }
 
-        // Đổ khuôn (Chiếu bóng lên bộ nhớ)
+        // Project memory shadows
         for (int i = 0; i <= 730; ++i) {
             std::tm next_tm = add_days(curr_tm, i);
             std::string next_date = format_date(next_tm);
             if (next_date > end_limit) break;
+            if (next_date < format_date(window_start)) continue; 
 
             bool should_spawn = false;
-            if (tmpl.repeat_type == 0 || tmpl.repeat_type == 3) { // After Done sinh vật lý, nên ảo chỉ có 1
+            if (tmpl.repeat_type == 0 || tmpl.repeat_type == 3) { 
                 should_spawn = (i == 0);
             } else if (tmpl.repeat_type == 1 && (i % interval == 0)) {
                 should_spawn = true;
@@ -329,15 +325,13 @@ void load_tasks() {
                 }
             }
 
-            if (should_spawn) {
-                tasks_db[next_date].push_back(tmpl);
-            }
+            if (should_spawn) tasks_db[next_date].push_back(tmpl);
             if (tmpl.repeat_type == 0 || tmpl.repeat_type == 3) break; 
         }
     }
     sqlite3_finalize(stmt);
 
-    // Bước 2: Kéo "Ngoại lệ" và ghi đè lên các bóng ảo
+    // Load state overrides (Exceptions)
     const char* q_inst = "SELECT * FROM instances;";
     sqlite3_prepare_v2(db, q_inst, -1, &stmt, 0);
     while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -360,7 +354,7 @@ void load_tasks() {
     }
     sqlite3_finalize(stmt);
 
-    // [CHỈNH SỬA] Đồng bộ lại pomo_task_idx nếu vector tasks_db bị dịch chuyển do user xóa/thêm Task (Chống Vector Shift)
+    // Anchor check against Vector Shift
     if (is_pomo_active && !pomo_task_date.empty()) {
         bool found = false;
         auto& tasks = tasks_db[pomo_task_date];
@@ -369,12 +363,12 @@ void load_tasks() {
                 pomo_task_idx = i; found = true; break;
             }
         }
-        if (!found) is_pomo_active = false; // Tự hủy Pomo nếu Task gốc bị user xóa hẳn khỏi DB
+        if (!found) is_pomo_active = false; 
     }
 }
 
 // ---------------------------------------------------------
-// UI Rendering - Giữ nguyên phong cách cũ
+// UI Rendering
 std::string center_text(const std::string& text, int width) {
     int pad_left = std::max(0, (width - (int)text.length()) / 2);
     int pad_right = std::max(0, width - (int)text.length() - pad_left);
@@ -578,7 +572,7 @@ void render_ui(Page current_page, int sel_idx, int sched_sel_c, const std::tm& c
             if (is_pomo_paused) phase_txt += " (PAUSED)";
             
             int color = is_work_phase ? CP_RED : CP_GREEN; 
-            int h = time_remaining / 3600; int m = (time_remaining % 3600) / 60; int s = time_remaining % 60;
+            int h = std::abs(time_remaining) / 3600; int m = (std::abs(time_remaining) % 3600) / 60; int s = std::abs(time_remaining) % 60;
             
             attron(COLOR_PAIR(color) | A_BOLD); mvprintw(start_y, start_x + (block_w - phase_txt.length()) / 2, "%s", phase_txt.c_str()); attroff(COLOR_PAIR(color));
             mvprintw(start_y + 1, start_x + (block_w - 8) / 2, "%02d:%02d:%02d", h, m, s); attroff(A_BOLD);
@@ -651,15 +645,14 @@ int main() {
     init_db();
     std::atexit(cleanup_ncurses);
     
-    load_tasks(); 
-
-    Page current_page = Page::MAIN_MENU;
-    int main_sel_r = 0, pomo_sel = 0;
-    
     std::time_t init_t = std::time(nullptr);
     std::tm init_tm = *std::localtime(&init_t);
     std::tm current_week_sun = add_days(init_tm, -init_tm.tm_wday);
     
+    load_tasks(current_week_sun); 
+
+    Page current_page = Page::MAIN_MENU;
+    int main_sel_r = 0, pomo_sel = 0;
     int sched_sel_c = init_tm.tm_wday; 
     bool is_task_focused = false;   
 
@@ -692,7 +685,7 @@ int main() {
                             
                             if (current_unix >= task_epoch && current_unix - task_epoch < 7200) {
                                 task.is_notified = true;
-                                save_instance(task, d_key); // Lưu trạng thái notified vào SQLite
+                                save_instance(task, d_key);
                                 std::string safe_name = sanitize_for_shell(task.name);
                                 std::string cmd = "notify-send -u critical 'Task Reminder' 'Time to work: " + safe_name + "' &";
                                 system(cmd.c_str());
@@ -733,7 +726,6 @@ int main() {
         if (key == ERR) {
             if (any_task_running) needs_redraw = true; 
 
-            // [CHỈNH SỬA] Dùng delta timestamp thay vì time_remaining-- mù quáng để sửa lỗi trôi timer và suspend (sleep)
             if (is_pomo_active && !is_pomo_paused) {
                 int delta = current_unix - pomo_last_tick;
                 
@@ -742,16 +734,22 @@ int main() {
                     session_time_elapsed += delta;
                     pomo_last_tick = current_unix;
                     
-                    if (eye_break_enabled && session_time_elapsed > 0 && session_time_elapsed % 1200 == 0) {
-                        is_eye_break_active = true; eye_break_remaining = 20;
-                        if (current_page != Page::POMODORO_RUN) current_page = Page::POMODORO_RUN;
+                    // Eye break evaluation crossing 20m marks
+                    if (eye_break_enabled) {
+                        int prev_elapsed = session_time_elapsed - delta;
+                        if (prev_elapsed >= 0 && (session_time_elapsed / 1200) > (prev_elapsed / 1200)) {
+                            is_eye_break_active = true; eye_break_remaining = 20;
+                            if (current_page != Page::POMODORO_RUN) current_page = Page::POMODORO_RUN;
+                        }
                     }
+
                     if (is_eye_break_active) {
-                        if (eye_break_remaining > 0) eye_break_remaining -= delta; // [CHỈNH SỬA] Trừ delta luôn cho eye break
+                        eye_break_remaining -= delta; 
                         if (eye_break_remaining <= 0) is_eye_break_active = false;
                     }
-                    if (time_remaining <= 0) { // [CHỈNH SỬA] Cập nhật điều kiện vì delta có thể trừ âm sâu
-                        time_remaining = 0; // Kéo lại 0 để render không bị lỗi
+
+                    // Phase flip (continuous time handling implicitly flips once and dumps huge delta)
+                    if (time_remaining <= 0) { 
                         is_work_phase = !is_work_phase;
                         time_remaining = (is_work_phase ? work_time : break_time) * 60;
                         session_time_elapsed = 0; is_eye_break_active = false;
@@ -763,28 +761,20 @@ int main() {
                         } else {
                             if (t.status == 1) {
                                 t.status = 2; 
-                                // [CHỈNH SỬA] Chặn Time Leap: Giới hạn thời gian cộng thêm không vượt quá 1 session work_time nếu máy bị sleep
                                 long long real_added = std::time(nullptr) - t.last_start_timestamp;
-                                if (real_added > (work_time * 60 + 120)) real_added = work_time * 60;
                                 t.elapsed_sec += real_added;
                                 t.last_start_timestamp = 0;
                             }
                             system("notify-send -u critical 'Pomodoro' 'Break phase started!' &");
                         }
                         
-                        // [CHỈNH SỬA] Chống chạy lố chu kỳ (Time Leap): Tự động Pause nếu hệ thống bị gập máy quá lâu (> 5 phút)
-                        if (delta > 300) {
-                            is_pomo_paused = true;
-                            if (t.status == 1) { t.status = 2; t.last_start_timestamp = 0; } // Ép pause task
-                        }
-
                         save_instance(t, pomo_task_date);
                         beep(); 
                     }
                     needs_redraw = true; 
                 }
             } else {
-                pomo_last_tick = current_unix; // [CHỈNH SỬA] Liên tục dời mốc khi Pause để lúc Resume không bị trừ bù một cục to
+                pomo_last_tick = current_unix; 
             }
             continue; 
         }
@@ -810,21 +800,30 @@ int main() {
                 if (key == 'q' || key == 27) current_page = Page::MAIN_MENU;
                 else if (key == 'h' || key == KEY_LEFT) {
                     if (sched_sel_c > 0) sched_sel_c--;
-                    else { sched_sel_c = 6; current_week_sun = add_days(current_week_sun, -7); }
+                    else { 
+                        sched_sel_c = 6; 
+                        current_week_sun = add_days(current_week_sun, -7); 
+                        load_tasks(current_week_sun);
+                    }
                 }
                 else if (key == 'l' || key == KEY_RIGHT) {
                     if (sched_sel_c < 6) sched_sel_c++;
-                    else { sched_sel_c = 0; current_week_sun = add_days(current_week_sun, 7); }
+                    else { 
+                        sched_sel_c = 0; 
+                        current_week_sun = add_days(current_week_sun, 7); 
+                        load_tasks(current_week_sun);
+                    }
                 }
                 else if (key == 't') {
                     current_week_sun = add_days(*now, -now->tm_wday);
                     sched_sel_c = now->tm_wday;
+                    load_tasks(current_week_sun);
                 }
                 else if (key == '\r' || key == '\n' || key == KEY_ENTER || key == ' ') {
                     if (!tasks_db[selected_date_str].empty()) { is_task_focused = true; task_sel_idx = 0; }
                 }
                 else if (key == 'a') {
-                    Task new_t; new_t.id = 0; // Chưa lưu
+                    Task new_t; new_t.id = 0; 
                     new_t.created_date = selected_date_str;
                     tasks_db[selected_date_str].push_back(new_t);
                     current_page = Page::TASK_EDIT; task_sel_idx = tasks_db[selected_date_str].size() - 1;
@@ -856,7 +855,7 @@ int main() {
                             current_page = Page::POMODORO_RUN;
                         } else {
                             pomo_task_date = selected_date_str; pomo_task_idx = task_sel_idx;
-                            pomo_task_id = tasks_db[selected_date_str][task_sel_idx].id; // [CHỈNH SỬA] Lưu lại ID chống Vector Shift
+                            pomo_task_id = tasks_db[selected_date_str][task_sel_idx].id; 
                             current_page = Page::POMODORO; pomo_sel = 0;
                         }
                     }
@@ -870,7 +869,7 @@ int main() {
                             
                             if (is_pomo_active && pomo_task_date == selected_date_str && pomo_task_idx == task_sel_idx) {
                                 is_pomo_paused = false;
-                                pomo_last_tick = std::time(nullptr); // [CHỈNH SỬA] Reset mốc khi gỡ pause qua hotkey 's'
+                                pomo_last_tick = std::time(nullptr); 
                                 if (!is_work_phase) { is_work_phase = true; time_remaining = work_time * 60; session_time_elapsed = 0; }
                             } else if (is_pomo_active) {
                                 is_pomo_paused = true; Task& old_t = tasks_db[pomo_task_date][pomo_task_idx];
@@ -900,7 +899,7 @@ int main() {
                         t.status = 3; 
                         save_instance(t, selected_date_str);
 
-                        // Logic cho Repeat After Done
+                        // Repeat After Done mapping
                         if (t.repeat_type == 3) {
                             int n_days = 1; 
                             try { n_days = std::stoi(t.repeat_val); } catch(...) { n_days = 1; } 
@@ -911,8 +910,8 @@ int main() {
                             Task clone = t; 
                             clone.status = 0; clone.elapsed_sec = 0; clone.last_start_timestamp = 0; clone.is_notified = false;
                             clone.created_date = target_str;
-                            insert_series(clone); // Đẻ thẳng khuôn mới (vì mỗi After Done chỉ diễn ra 1 lần)
-                            load_tasks(); // Refresh ảo
+                            insert_series(clone); 
+                            load_tasks(current_week_sun); 
                         }
                     }
                 }
@@ -925,15 +924,14 @@ int main() {
                         }
 
                         if (t.repeat_type > 0) {
-                            t.status = 4; // Skip instance (đánh dấu vào bảng instances)
+                            t.status = 4; 
                             save_instance(t, selected_date_str);
                         } else {
-                            // Xóa hẳn series nếu nó không phải lặp
                             std::string sql = "DELETE FROM series WHERE id=" + std::to_string(t.id) + ";";
                             sqlite3_exec(db, sql.c_str(), 0, 0, 0);
                         }
 
-                        load_tasks();
+                        load_tasks(current_week_sun);
                         if (tasks_db[selected_date_str].empty()) is_task_focused = false; 
                         else if (task_sel_idx >= (int)tasks_db[selected_date_str].size()) task_sel_idx--;
                     }
@@ -947,12 +945,14 @@ int main() {
                         }
 
                         if (t.id != 0 && t.repeat_type > 0) {
-                            // Chặn tương lai của series cũ ở ngày hôm qua
                             std::string yesterday = format_date(add_days(string_to_tm(selected_date_str), -1));
-                            std::string sql = "UPDATE series SET until_date = '" + yesterday + "' WHERE id = " + std::to_string(t.id) + ";";
-                            sqlite3_exec(db, sql.c_str(), 0, 0, 0);
                             
-                            load_tasks();
+                            if (t.until_date.empty() || t.until_date > yesterday) {
+                                std::string sql = "UPDATE series SET until_date = '" + yesterday + "' WHERE id = " + std::to_string(t.id) + ";";
+                                sqlite3_exec(db, sql.c_str(), 0, 0, 0);
+                            }
+                            
+                            load_tasks(current_week_sun);
                             if (task_sel_idx >= (int)tasks_db[selected_date_str].size()) task_sel_idx = std::max(0, (int)tasks_db[selected_date_str].size() - 1);
                             if (tasks_db[selected_date_str].empty()) is_task_focused = false;
                         }
@@ -988,7 +988,7 @@ int main() {
                 if (key == 'q' || key == 27) {
                     bool is_changed = has_task_changed(original_task_state, t);
 
-                    if (t.id == 0) { // New task chưa lưu
+                    if (t.id == 0) { 
                         if (t.name != "New Task" || t.desc != "") {
                             insert_series(t);
                         } else {
@@ -1015,34 +1015,34 @@ int main() {
                                 int time_passed = (int)(std::time(nullptr) - wait_start);
                                 time_remaining -= time_passed;
                                 session_time_elapsed += time_passed;
-                                if (time_remaining < 0) time_remaining = 0;
                             }
                             
-                            // [CHỈNH SỬA - MAGIC HAPPENS HERE] Logic tách dòng thời gian
+                            // Splitting timeline based on user choice
                             if (ans == 'y' || ans == 'Y') { 
                                 std::string yesterday = format_date(add_days(string_to_tm(selected_date_str), -1));
-                                std::string sql = "UPDATE series SET until_date = '" + yesterday + "' WHERE id = " + std::to_string(t.id) + ";";
-                                sqlite3_exec(db, sql.c_str(), 0, 0, 0);
+                                if (t.until_date.empty() || t.until_date > yesterday) {
+                                    std::string sql = "UPDATE series SET until_date = '" + yesterday + "' WHERE id = " + std::to_string(t.id) + ";";
+                                    sqlite3_exec(db, sql.c_str(), 0, 0, 0);
+                                }
                                 
                                 t.created_date = selected_date_str;
                                 t.until_date = "";
                                 insert_series(t); 
                             }
                             else { 
-                                // Nếu chỉ sửa mỗi ngày này (Exception), đánh dấu skip cho luật gốc vào ngày này
                                 std::string sql_skip = "INSERT INTO instances (series_id, date_str, status) VALUES (" + std::to_string(t.id) + ", '" + selected_date_str + "', 4) ON CONFLICT(series_id, date_str) DO UPDATE SET status=4;";
                                 sqlite3_exec(db, sql_skip.c_str(), 0, 0, 0);
 
-                                t.repeat_type = 0; // Tách thành task đơn lẻ
+                                t.repeat_type = 0; 
                                 t.created_date = selected_date_str;
                                 insert_series(t);
                             } 
                         } else {
-                            update_series(t); // Single task thì update bình thường
+                            update_series(t); 
                         }
                     } 
                     
-                    load_tasks(); // Parse chiếu bóng lại
+                    load_tasks(current_week_sun); 
                     current_page = Page::SCHEDULE;
                     
                     if (tasks_db[selected_date_str].empty()) is_task_focused = false;
@@ -1058,7 +1058,7 @@ int main() {
                     if (edit_sel_idx == 6) { is_insert_mode = true; input_buffer = ""; }
                     if (edit_sel_idx == idx_repeat_type + 1) { is_insert_mode = true; input_buffer = t.repeat_val; }
                 }
-                else if (key == '\r' || key == '\n' || key == KEY_ENTER || key == ' ') { // [CHỈNH SỬA] Thêm phím Space ở Normal Mode
+                else if (key == '\r' || key == '\n' || key == KEY_ENTER || key == ' ') { 
                     if (edit_sel_idx == 2) { t.has_start = !t.has_start; }
                     if (edit_sel_idx == 5) { t.has_custom_deadline = !t.has_custom_deadline; }
                     if (edit_sel_idx == idx_repeat_type) { 
@@ -1102,7 +1102,7 @@ int main() {
                                  }
                             }
                             is_pomo_active = true; is_pomo_paused = false; current_page = Page::POMODORO_RUN;
-                            pomo_last_tick = std::time(nullptr); // [CHỈNH SỬA] Đặt mốc time lúc bắt đầu chạy
+                            pomo_last_tick = std::time(nullptr); 
                             is_work_phase = true; time_remaining = work_time * 60; session_time_elapsed = 0; is_eye_break_active = false;
                             
                             Task& t = tasks_db[pomo_task_date][pomo_task_idx];
@@ -1117,7 +1117,7 @@ int main() {
             if (key == 'q' || key == 27) { current_page = Page::SCHEDULE; }
             else if (key == 's') {
                 is_pomo_paused = !is_pomo_paused;
-                if (!is_pomo_paused) pomo_last_tick = std::time(nullptr); // [CHỈNH SỬA] Reset mốc khi gỡ pause
+                if (!is_pomo_paused) pomo_last_tick = std::time(nullptr); 
                 Task& t = tasks_db[pomo_task_date][pomo_task_idx];
                 if (is_pomo_paused) {
                     if (t.status == 1) {
