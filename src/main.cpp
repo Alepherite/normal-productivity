@@ -66,6 +66,7 @@ Task original_task_state;
 // Pomodoro State
 std::string pomo_task_date = "";
 int pomo_task_idx = -1;
+int pomo_task_id = -1; // [CHỈNH SỬA] Lưu ID thực của task để làm mỏ neo chống văng mảng (Vector Shift)
 int session_time_elapsed = 0;
 bool is_eye_break_active = false;
 int eye_break_remaining = 0;
@@ -358,6 +359,18 @@ void load_tasks() {
         }
     }
     sqlite3_finalize(stmt);
+
+    // [CHỈNH SỬA] Đồng bộ lại pomo_task_idx nếu vector tasks_db bị dịch chuyển do user xóa/thêm Task (Chống Vector Shift)
+    if (is_pomo_active && !pomo_task_date.empty()) {
+        bool found = false;
+        auto& tasks = tasks_db[pomo_task_date];
+        for (size_t i = 0; i < tasks.size(); ++i) {
+            if (tasks[i].id == pomo_task_id) {
+                pomo_task_idx = i; found = true; break;
+            }
+        }
+        if (!found) is_pomo_active = false; // Tự hủy Pomo nếu Task gốc bị user xóa hẳn khỏi DB
+    }
 }
 
 // ---------------------------------------------------------
@@ -621,7 +634,7 @@ void render_ui(Page current_page, int sel_idx, int sched_sel_c, const std::tm& c
         print_key("i / Enter", "Edit text field / Toggle options");
         print_key("h/H or l/L", "Decrease / Increase time values");
         print_key("s / c (Pomo)", "Pause / Cancel Pomodoro session");
-        print_key("q (Pomo)", "Run Pomodoro in background"); // [CHỈNH SỬA] Bổ sung hướng dẫn cực kỳ quan trọng
+        print_key("q (Pomo)", "Run Pomodoro in background"); 
 
         attron(A_DIM); std::string footer = "Press [q] or [ESC] to return";
         mvprintw(start_y + info_h - 1, start_x + (info_w - footer.length()) / 2, "%s", footer.c_str()); 
@@ -737,7 +750,7 @@ int main() {
                         if (eye_break_remaining > 0) eye_break_remaining -= delta; // [CHỈNH SỬA] Trừ delta luôn cho eye break
                         if (eye_break_remaining <= 0) is_eye_break_active = false;
                     }
-                    if (time_remaining <= 0) { // [CHỈNH SỬA] Cập nhật điều kiện vì delta có thể trừ âm
+                    if (time_remaining <= 0) { // [CHỈNH SỬA] Cập nhật điều kiện vì delta có thể trừ âm sâu
                         time_remaining = 0; // Kéo lại 0 để render không bị lỗi
                         is_work_phase = !is_work_phase;
                         time_remaining = (is_work_phase ? work_time : break_time) * 60;
@@ -750,11 +763,21 @@ int main() {
                         } else {
                             if (t.status == 1) {
                                 t.status = 2; 
-                                t.elapsed_sec += (std::time(nullptr) - t.last_start_timestamp);
+                                // [CHỈNH SỬA] Chặn Time Leap: Giới hạn thời gian cộng thêm không vượt quá 1 session work_time nếu máy bị sleep
+                                long long real_added = std::time(nullptr) - t.last_start_timestamp;
+                                if (real_added > (work_time * 60 + 120)) real_added = work_time * 60;
+                                t.elapsed_sec += real_added;
                                 t.last_start_timestamp = 0;
                             }
                             system("notify-send -u critical 'Pomodoro' 'Break phase started!' &");
                         }
+                        
+                        // [CHỈNH SỬA] Chống chạy lố chu kỳ (Time Leap): Tự động Pause nếu hệ thống bị gập máy quá lâu (> 5 phút)
+                        if (delta > 300) {
+                            is_pomo_paused = true;
+                            if (t.status == 1) { t.status = 2; t.last_start_timestamp = 0; } // Ép pause task
+                        }
+
                         save_instance(t, pomo_task_date);
                         beep(); 
                     }
@@ -833,6 +856,7 @@ int main() {
                             current_page = Page::POMODORO_RUN;
                         } else {
                             pomo_task_date = selected_date_str; pomo_task_idx = task_sel_idx;
+                            pomo_task_id = tasks_db[selected_date_str][task_sel_idx].id; // [CHỈNH SỬA] Lưu lại ID chống Vector Shift
                             current_page = Page::POMODORO; pomo_sel = 0;
                         }
                     }
@@ -896,7 +920,6 @@ int main() {
                     if (!tasks_db[selected_date_str].empty()) {
                         Task& t = tasks_db[selected_date_str][task_sel_idx];
                         
-                        // [CHỈNH SỬA] Hủy Pomodoro nếu Task đang chạy ngầm bị xóa, tránh crash Out of Bounds vector
                         if (is_pomo_active && pomo_task_date == selected_date_str && pomo_task_idx == task_sel_idx) {
                             is_pomo_active = false; 
                         }
@@ -919,7 +942,6 @@ int main() {
                     if (!tasks_db[selected_date_str].empty()) {
                         Task& t = tasks_db[selected_date_str][task_sel_idx];
 
-                        // [CHỈNH SỬA] Giống phím 'D', chặn crash
                         if (is_pomo_active && pomo_task_date == selected_date_str && pomo_task_idx == task_sel_idx) {
                             is_pomo_active = false; 
                         }
@@ -1036,7 +1058,7 @@ int main() {
                     if (edit_sel_idx == 6) { is_insert_mode = true; input_buffer = ""; }
                     if (edit_sel_idx == idx_repeat_type + 1) { is_insert_mode = true; input_buffer = t.repeat_val; }
                 }
-                else if (key == '\r' || key == '\n' || key == KEY_ENTER) {
+                else if (key == '\r' || key == '\n' || key == KEY_ENTER || key == ' ') { // [CHỈNH SỬA] Thêm phím Space ở Normal Mode
                     if (edit_sel_idx == 2) { t.has_start = !t.has_start; }
                     if (edit_sel_idx == 5) { t.has_custom_deadline = !t.has_custom_deadline; }
                     if (edit_sel_idx == idx_repeat_type) { 
