@@ -864,6 +864,18 @@ int main() {
                     if (!tasks_db[selected_date_str].empty()) {
                         Task& t = tasks_db[selected_date_str][task_sel_idx];
                         if (t.status == 0 || t.status == 2) {
+                            // [FIX] Tự động tạm dừng các task khác đang chạy để tránh làm nhiều việc cùng lúc
+                            for (auto& [d_key, t_list] : tasks_db) {
+                                for (auto& other_t : t_list) {
+                                    if (other_t.status == 1 && (d_key != selected_date_str || other_t.id != t.id)) {
+                                        other_t.status = 2;
+                                        other_t.elapsed_sec += (std::time(nullptr) - other_t.last_start_timestamp);
+                                        other_t.last_start_timestamp = 0;
+                                        save_instance(other_t, d_key);
+                                    }
+                                }
+                            }
+                            
                             t.status = 1; t.last_start_timestamp = std::time(nullptr);
                             system(("notify-send -u low 'Task Started' 'Working on: " + sanitize_for_shell(t.name) + "' &").c_str());
                             
@@ -898,6 +910,11 @@ int main() {
                         }
                         t.status = 3; 
                         save_instance(t, selected_date_str);
+
+                        // [FIX] Tự động ngắt Pomodoro nếu task này đã hoàn thành
+                        if (is_pomo_active && pomo_task_date == selected_date_str && pomo_task_idx == task_sel_idx) {
+                            is_pomo_active = false;
+                        }
 
                         // Repeat After Done mapping
                         if (t.repeat_type == 3) {
@@ -991,6 +1008,10 @@ int main() {
                     if (t.id == 0) { 
                         if (t.name != "New Task" || t.desc != "") {
                             insert_series(t);
+                            // [FIX] Cập nhật lại mỏ neo pomo_task_id nếu vừa save task mới (id từ 0 thành >0)
+                            if (is_pomo_active && pomo_task_date == selected_date_str && pomo_task_idx == task_sel_idx) {
+                                pomo_task_id = t.id;
+                            }
                         } else {
                             tasks_db[selected_date_str].erase(tasks_db[selected_date_str].begin() + task_sel_idx);
                         }
