@@ -268,6 +268,7 @@ void load_tasks(const std::tm& focus_date) {
     std::tm window_start = add_days(focus_date, -30);
     std::tm window_end = add_days(focus_date, 60);
     std::string limit_future = format_date(window_end); 
+    std::string limit_past = format_date(window_start);
     
     const char* q_series = "SELECT * FROM series;";
     sqlite3_stmt* stmt;
@@ -307,12 +308,23 @@ void load_tasks(const std::tm& focus_date) {
             if (week_days.empty()) week_days.push_back(curr_tm.tm_wday);
         }
 
-        // Project memory shadows
-        for (int i = 0; i <= 730; ++i) {
+        // Project memory shadows: Fast-forward logic to avoid excessive mktime calls
+        int start_offset = 0;
+        if (tmpl.created_date < limit_past) {
+            std::tm tm_curr_copy = curr_tm;
+            std::time_t t_curr = std::mktime(&tm_curr_copy);
+            std::tm tm_win_start = window_start;
+            std::time_t t_win = std::mktime(&tm_win_start);
+            start_offset = (t_win - t_curr) / 86400;
+            if (start_offset < 0) start_offset = 0;
+        }
+
+        // Limit iteration strictly to the 90-day projection window (+ padding)
+        for (int i = start_offset; i <= start_offset + 95; ++i) {
             std::tm next_tm = add_days(curr_tm, i);
             std::string next_date = format_date(next_tm);
             if (next_date > end_limit) break;
-            if (next_date < format_date(window_start)) continue; 
+            if (next_date < limit_past) continue; 
 
             bool should_spawn = false;
             if (tmpl.repeat_type == 0 || tmpl.repeat_type == 3) { 
@@ -864,7 +876,7 @@ int main() {
                     if (!tasks_db[selected_date_str].empty()) {
                         Task& t = tasks_db[selected_date_str][task_sel_idx];
                         if (t.status == 0 || t.status == 2) {
-                            // [FIX] Tự động tạm dừng các task khác đang chạy để tránh làm nhiều việc cùng lúc
+                            // Tự động tạm dừng các task khác đang chạy để tránh làm nhiều việc cùng lúc
                             for (auto& [d_key, t_list] : tasks_db) {
                                 for (auto& other_t : t_list) {
                                     if (other_t.status == 1 && (d_key != selected_date_str || other_t.id != t.id)) {
@@ -911,7 +923,7 @@ int main() {
                         t.status = 3; 
                         save_instance(t, selected_date_str);
 
-                        // [FIX] Tự động ngắt Pomodoro nếu task này đã hoàn thành
+                        // Tự động ngắt Pomodoro nếu task này đã hoàn thành
                         if (is_pomo_active && pomo_task_date == selected_date_str && pomo_task_idx == task_sel_idx) {
                             is_pomo_active = false;
                         }
@@ -1008,7 +1020,7 @@ int main() {
                     if (t.id == 0) { 
                         if (t.name != "New Task" || t.desc != "") {
                             insert_series(t);
-                            // [FIX] Cập nhật lại mỏ neo pomo_task_id nếu vừa save task mới (id từ 0 thành >0)
+                            // Cập nhật lại mỏ neo pomo_task_id nếu vừa lưu task mới (id từ 0 thành >0)
                             if (is_pomo_active && pomo_task_date == selected_date_str && pomo_task_idx == task_sel_idx) {
                                 pomo_task_id = t.id;
                             }
