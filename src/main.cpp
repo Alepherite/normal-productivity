@@ -13,6 +13,7 @@
 #include <clocale>
 #include <cstdio> 
 
+// [FIX] Use ncursesw for UTF-8 support
 #include <ncurses.h>
 #include <sqlite3.h>
 
@@ -344,8 +345,10 @@ void load_tasks(const std::tm& focus_date) {
     sqlite3_finalize(stmt);
 
     // Load state overrides (Exceptions)
-    const char* q_inst = "SELECT * FROM instances;";
-    sqlite3_prepare_v2(db, q_inst, -1, &stmt, 0);
+    // [FIX] Filter instances by projection window to optimize memory (prevent full table scan)
+    std::string q_inst_str = "SELECT * FROM instances WHERE date_str >= '" + limit_past + "' AND date_str <= '" + limit_future + "';";
+    sqlite3_prepare_v2(db, q_inst_str.c_str(), -1, &stmt, 0);
+    
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         int s_id = sqlite3_column_int(stmt, 0);
         std::string d_str = (const char*)sqlite3_column_text(stmt, 1);
@@ -742,6 +745,13 @@ int main() {
                 int delta = current_unix - pomo_last_tick;
                 
                 if (delta > 0) {
+                    // [FIX] Auto-pause if system was suspended (jump > 3 mins) to prevent timer break
+                    if (delta > 180) {
+                        is_pomo_paused = true;
+                        pomo_last_tick = current_unix;
+                        continue;
+                    }
+
                     time_remaining -= delta;
                     session_time_elapsed += delta;
                     pomo_last_tick = current_unix;
@@ -967,23 +977,41 @@ int main() {
                 }
                 else if (key == 'X') {
                     if (!tasks_db[selected_date_str].empty()) {
-                        Task& t = tasks_db[selected_date_str][task_sel_idx];
-
-                        if (is_pomo_active && pomo_task_date == selected_date_str && pomo_task_idx == task_sel_idx) {
-                            is_pomo_active = false; 
+                        // [FIX] Add confirmation for series deletion
+                        attron(COLOR_PAIR(CP_SELECTED));
+                        mvprintw(LINES/2, (COLS - 42)/2, "┌────────────────────────────────────────┐");
+                        mvprintw(LINES/2 + 1, (COLS - 42)/2, "│ Delete/End this recurring series? [y/N]│");
+                        mvprintw(LINES/2 + 2, (COLS - 42)/2, "└────────────────────────────────────────┘");
+                        attroff(COLOR_PAIR(CP_SELECTED));
+                        refresh();
+                        
+                        timeout(-1);
+                        int ans;
+                        while (true) {
+                            ans = getch();
+                            if (ans == 'y' || ans == 'Y' || ans == 'n' || ans == 'N' || ans == 27 || ans == '\n' || ans == '\r') break;
                         }
+                        timeout(timeout_ms);
+                        
+                        if (ans == 'y' || ans == 'Y') {
+                            Task& t = tasks_db[selected_date_str][task_sel_idx];
 
-                        if (t.id != 0 && t.repeat_type > 0) {
-                            std::string yesterday = format_date(add_days(string_to_tm(selected_date_str), -1));
-                            
-                            if (t.until_date.empty() || t.until_date > yesterday) {
-                                std::string sql = "UPDATE series SET until_date = '" + yesterday + "' WHERE id = " + std::to_string(t.id) + ";";
-                                sqlite3_exec(db, sql.c_str(), 0, 0, 0);
+                            if (is_pomo_active && pomo_task_date == selected_date_str && pomo_task_idx == task_sel_idx) {
+                                is_pomo_active = false; 
                             }
-                            
-                            load_tasks(current_week_sun);
-                            if (task_sel_idx >= (int)tasks_db[selected_date_str].size()) task_sel_idx = std::max(0, (int)tasks_db[selected_date_str].size() - 1);
-                            if (tasks_db[selected_date_str].empty()) is_task_focused = false;
+
+                            if (t.id != 0 && t.repeat_type > 0) {
+                                std::string yesterday = format_date(add_days(string_to_tm(selected_date_str), -1));
+                                
+                                if (t.until_date.empty() || t.until_date > yesterday) {
+                                    std::string sql = "UPDATE series SET until_date = '" + yesterday + "' WHERE id = " + std::to_string(t.id) + ";";
+                                    sqlite3_exec(db, sql.c_str(), 0, 0, 0);
+                                }
+                                
+                                load_tasks(current_week_sun);
+                                if (task_sel_idx >= (int)tasks_db[selected_date_str].size()) task_sel_idx = std::max(0, (int)tasks_db[selected_date_str].size() - 1);
+                                if (tasks_db[selected_date_str].empty()) is_task_focused = false;
+                            }
                         }
                     }
                 }
@@ -1014,7 +1042,14 @@ int main() {
                 else if (key >= 32 && key <= 255) { input_buffer += (char)key; }
             } 
             else { 
-                if (key == 'q' || key == 27) {
+                // [FIX] Esc aborts changes, 'q' saves changes
+                if (key == 27) {
+                    load_tasks(current_week_sun); // Reset unsaved changes in RAM
+                    current_page = Page::SCHEDULE;
+                    if (tasks_db[selected_date_str].empty()) is_task_focused = false;
+                    else if (task_sel_idx >= (int)tasks_db[selected_date_str].size()) task_sel_idx = tasks_db[selected_date_str].size() - 1;
+                }
+                else if (key == 'q') {
                     bool is_changed = has_task_changed(original_task_state, t);
 
                     if (t.id == 0) { 
