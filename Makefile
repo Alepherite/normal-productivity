@@ -3,28 +3,28 @@
 APP_NAME  ?= my_tui_app
 BUILD_DIR ?= build
 
-# Tự động gom các file .go để Make kiểm tra dependency chính xác
+# Automatically find all .go files for accurate dependency tracking
 SRCS := $(shell find . -type f -name '*.go')
 
 all: build
 
-# Chỉ rebuild khi thực sự có file .go thay đổi
+# Only rebuild when .go files actually change
 $(BUILD_DIR)/$(APP_NAME): $(SRCS)
 	@mkdir -p $(BUILD_DIR)
 	@go build -o $@ .
 
 build: $(BUILD_DIR)/$(APP_NAME)
 
-# Rebuild (nếu có thay đổi) rồi mới chạy
+# Rebuild (if changed) then run
 run: build
 	@./$(BUILD_DIR)/$(APP_NAME)
 
-# Live-reload khi code TUI (cần cài air: go install github.com/air-verse/air@latest)
+# Live-reload for TUI development (requires air: go install github.com/air-verse/air@latest)
 dev:
 	@if command -v air > /dev/null; then \
 		air; \
 	else \
-		echo "Chưa cài air. Đang chạy fallback bằng 'make run'..."; \
+		echo "air is not installed. Falling back to 'make run'..."; \
 		make run; \
 	fi
 
@@ -32,8 +32,8 @@ clean:
 	@rm -rf $(BUILD_DIR)
 
 help:
-	@echo "Các lệnh hỗ trợ:"
-	@echo "  make build  - Build binary vào $(BUILD_DIR)/"
-	@echo "  make run    - Rebuild (nếu cần) và chạy ứng dụng"
-	@echo "  make dev    - Chạy live-reload (tự rebuild khi sửa file)"
-	@echo "  make clean  - Xóa thư mục build"
+	@echo "Available commands:"
+	@echo "  make build  - Build binary into $(BUILD_DIR)/"
+	@echo "  make run    - Rebuild (if needed) and run the application"
+	@echo "  make dev    - Run live-reload (auto-rebuilds on file changes)"
+	@echo "  make clean  - Remove the build directory"

@@ -122,15 +122,14 @@ func (m model) reloadTasks() model {
 	limitPast := windowStart.Format("2006-01-02")
 	limitFuture := windowEnd.Format("2006-01-02")
 
-	// [FIX]: Added ORDER BY id ASC to ensure stable task list ordering
 	rows, err := db.Query("SELECT * FROM series ORDER BY id ASC")
 	if err == nil && rows != nil {
 		defer rows.Close()
 		for rows.Next() {
 			var t Task
 			rows.Scan(
-				&t.ID, &t.Name, &t.Desc, &t.HasStart, &t.StartMin, 
-				&t.DurationMin, &t.HasCustomDeadline, &t.DeadlineMin, 
+				&t.ID, &t.Name, &t.Desc, &t.HasStart, &t.StartMin,
+				&t.DurationMin, &t.HasCustomDeadline, &t.DeadlineMin,
 				&t.RepeatType, &t.RepeatVal, &t.CreatedDate, &t.UntilDate,
 			)
 
@@ -270,7 +269,7 @@ func handleTick(m model) model {
 	if m.isPomoActive && !m.isPomoPaused {
 		delta := int(now.Sub(m.pomoLastTick).Seconds())
 		if delta > 0 {
-			if delta > 180 { 
+			if delta > 180 {
 				m.isPomoPaused = true
 				m.pomoLastTick = now
 				return m
@@ -495,10 +494,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			} else {
 				if k == "esc" {
-					m = m.reloadTasks() 
+					m = m.reloadTasks()
 					m.state = stateSchedule
 				}
-				if k == "q" { 
+				if k == "q" {
 					if t.ID == 0 {
 						if t.Name != "New Task" || t.Desc != "" {
 							insertSeries(&t)
@@ -561,7 +560,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.tasksDB[m.selectedDate][m.taskSelIdx] = t
 				}
-			} 
+			}
 
 		case statePomodoro:
 			if k == "q" || k == "esc" {
@@ -612,7 +611,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.timeRemaining = m.workTime * 60
 					m.sessionTimeElapsed = 0
 					m.isEyeBreakActive = false
-					
+
 					t := m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx]
 					if t.Status != 1 {
 						t.Status = 1
@@ -684,14 +683,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// Hàm hỗ trợ UI Responsive
+func clamp(val, min, max int) int {
+	if val < min { return min }
+	if val > max { return max }
+	return val
+}
+
+// Cắt chuỗi an toàn với Unicode (Tiếng Việt)
+func truncateStr(s string, maxLen int) string {
+	runes := []rune(s)
+	if len(runes) > maxLen {
+		if maxLen > 3 {
+			return string(runes[:maxLen-3]) + "..."
+		}
+		return string(runes[:maxLen])
+	}
+	return s
+}
+
 func (m model) View() string {
 	if m.width == 0 {
 		return "Initializing..."
 	}
-	
+
+	// Cơ chế phòng vệ: Tránh crash nếu Terminal bị bóp quá nhỏ
+	if m.width < 45 || m.height < 15 {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
+			lipgloss.NewStyle().Foreground(red).Render("Terminal is too small.\nPlease resize window."))
+	}
+
 	var ui string
 	switch m.state {
 	case stateMainMenu:
+		// Menu tự scale chiều ngang từ 24 đến 40 tùy cửa sổ
+		menuW := clamp(m.width/3, 24, 40)
 		menuItems := []string{"Schedule", "Info"}
 		var boxes []string
 		for i, text := range menuItems {
@@ -699,11 +725,17 @@ func (m model) View() string {
 			if i == m.mainSel {
 				style = activeStyle
 			}
-			boxes = append(boxes, style.Width(24).Height(3).Render(text))
+			boxes = append(boxes, style.Width(menuW).Height(3).Render(text))
 		}
 		ui = lipgloss.JoinVertical(lipgloss.Center, boxes...)
 
 	case stateSchedule:
+		// 1. Grid 7 ngày Responsive
+		// Chiều rộng mỗi ô = tổng màn hình chia 7, chừa viền
+		dayW := clamp((m.width/7)-1, 7, 16)
+		// Tính tổng Width thực tế của cả dải 7 ngày để scale List bên dưới cho bằng
+		totalGridW := (dayW * 7) + 6 // +6 là khoảng cách giữa các viền
+
 		var dayBoxes []string
 		dayNames := []string{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
 		for i := 0; i < 7; i++ {
@@ -714,16 +746,16 @@ func (m model) View() string {
 			if cnt > 0 {
 				cntStr = fmt.Sprintf("[%d]", cnt)
 			}
-			
+
 			content := fmt.Sprintf("%s\n%s\n%s", dayNames[i], dStr, cntStr)
-			style := baseStyle.Copy().Width(9).Height(5)
-			
+			style := baseStyle.Copy().Width(dayW).Height(5)
+
 			isToday := isSameDay(date, time.Now())
 			if isToday {
 				style = style.Foreground(red).BorderForeground(red)
 			}
 
-			if i == m.schedSelC { 
+			if i == m.schedSelC {
 				if isToday {
 					style = style.Border(lipgloss.ThickBorder()).BorderForeground(red).Foreground(black).Background(red).Bold(true)
 				} else {
@@ -733,8 +765,9 @@ func (m model) View() string {
 			dayBoxes = append(dayBoxes, style.Render(content))
 		}
 		grid := lipgloss.JoinHorizontal(lipgloss.Top, dayBoxes...)
-		
-		listUI := hlWhite.Render("Tasks for " + m.selectedDate) + "\n\n"
+
+		// 2. Task List Responsive
+		listUI := hlWhite.Render("Tasks for "+m.selectedDate) + "\n\n"
 		tasks := m.tasksDB[m.selectedDate]
 		if len(tasks) == 0 {
 			listUI += dimText.Render("< No tasks for this day >") + "\n"
@@ -744,7 +777,7 @@ func (m model) View() string {
 				if m.isTaskFocused && i == m.taskSelIdx {
 					prefix = "> "
 				}
-				
+
 				statusSym := "[ ]"
 				if t.Status == 1 {
 					statusSym = "[>]"
@@ -755,29 +788,41 @@ func (m model) View() string {
 				} else if t.Status == 4 {
 					statusSym = "[S]"
 				}
-				
+
 				timeStr := "     "
 				if t.HasStart {
 					timeStr = formatTime24(t.StartMin)
 				}
-				
+
 				sep := " │ "
 				if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == i {
 					sep = " P "
 				}
-				
+
 				pct := 0.0
 				if t.DurationMin > 0 {
 					pct = (float64(getElapsedSec(t)) / float64(t.DurationMin*60)) * 100
 				}
-				row := fmt.Sprintf("%s%s %s%s%s [%5.1f%%]", prefix, statusSym, timeStr, sep, t.Name, pct)
-				
-				if m.isTaskFocused && i == m.taskSelIdx { 
-					row = reverseText.Render(row) 
-				} else if t.Status == 1 { 
-					row = hlWhite.Render(row) 
-				} else if t.Status == 3 || t.Status == 4 { 
-					row = dimText.Render(row) 
+				pctStr := fmt.Sprintf("[%5.1f%%]", pct)
+
+				// Tính toán không gian còn lại cho Tên Task để không rớt dòng
+				// 1 (prefix) + len(status) + space + len(time) + len(sep) + space + len(pctStr) = khoảng 24 char cố định
+				staticSpace := len(prefix) + len(statusSym) + 1 + len(timeStr) + len(sep) + len(pctStr) + 2
+				maxNameLen := totalGridW - staticSpace
+				if maxNameLen < 5 { maxNameLen = 5 } // An toàn
+
+				safeName := truncateStr(t.Name, maxNameLen)
+				// PadRight để cột % luôn nằm thẳng hàng ở rìa phải
+				paddedName := fmt.Sprintf("%-*s", maxNameLen, safeName)
+
+				row := fmt.Sprintf("%s%s %s%s%s %s", prefix, statusSym, timeStr, sep, paddedName, pctStr)
+
+				if m.isTaskFocused && i == m.taskSelIdx {
+					row = reverseText.Render(row)
+				} else if t.Status == 1 {
+					row = hlWhite.Render(row)
+				} else if t.Status == 3 || t.Status == 4 {
+					row = dimText.Render(row)
 				}
 				listUI += row + "\n"
 			}
@@ -786,39 +831,44 @@ func (m model) View() string {
 
 	case stateTaskEdit:
 		t := m.tasksDB[m.selectedDate][m.taskSelIdx]
-		
-		// 1. Popup Modal Input Mode
+		// Panel Edit scale tối thiểu 50, tối đa 80
+		editPanelW := clamp(m.width-4, 50, 80)
+		leftColW := 20
+		rightColW := editPanelW - leftColW - 6 // Trừ padding và dấu ":"
+
 		if m.isInsertMode {
 			titles := map[int]string{
-				0: "Edit Name", 
-				1: "Edit Description", 
-				4: "Edit Repeat Value", 
-				7: "Edit Repeat Value", 
+				0: "Edit Name",
+				1: "Edit Description",
+				4: "Edit Repeat Value",
+				7: "Edit Repeat Value",
 				8: "Edit Repeat Value",
 			}
 			title := titles[m.editSelIdx]
-			
-			boxContent := lipgloss.PlaceHorizontal(40, lipgloss.Center, hlWhite.Render(title)) + "\n\n" +
-						  lipgloss.NewStyle().Padding(0, 1).Render(m.textInput.View()) + "\n\n" +
-						  lipgloss.PlaceHorizontal(40, lipgloss.Center, dimText.Render("[Enter] Confirm   [Esc] Cancel"))
+
+			m.textInput.Width = rightColW - 4
+			boxContent := lipgloss.PlaceHorizontal(editPanelW-4, lipgloss.Center, hlWhite.Render(title)) + "\n\n" +
+				lipgloss.NewStyle().Padding(0, 1).Render(m.textInput.View()) + "\n\n" +
+				lipgloss.PlaceHorizontal(editPanelW-4, lipgloss.Center, dimText.Render("[Enter] Confirm   [Esc] Cancel"))
 
 			modal := lipgloss.NewStyle().
 				Border(lipgloss.RoundedBorder()).
 				BorderForeground(white).
 				Padding(1, 2).
+				Width(editPanelW).
 				Render(boxContent)
 
 			return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 		}
 
-		// 2. Main List Rendering Mode
-		ui = lipgloss.PlaceHorizontal(54, lipgloss.Center, hlWhite.Render("=== Edit Task ===")) + "\n\n"
-		
+		ui = lipgloss.PlaceHorizontal(editPanelW, lipgloss.Center, hlWhite.Render("=== Edit Task ===")) + "\n\n"
+
 		renderRow := func(idx int, label, val string, isField bool) string {
-			left := fmt.Sprintf("%20s", label)
-			right := fmt.Sprintf("< %-26s >", val)
+			safeVal := truncateStr(val, rightColW-4)
+			left := fmt.Sprintf("%*s", leftColW, label)
+			right := fmt.Sprintf("< %-*s >", rightColW-4, safeVal)
 			if isField {
-				right = fmt.Sprintf("[ %-26s ]", val)
+				right = fmt.Sprintf("[ %-*s ]", rightColW-4, safeVal)
 			}
 
 			rowStr := fmt.Sprintf("%s : %s", left, right)
@@ -831,7 +881,7 @@ func (m model) View() string {
 		ui += renderRow(0, "Name", t.Name, true)
 		ui += renderRow(1, "Description", t.Desc, true)
 		ui += renderRow(2, "Has Start Time", map[bool]string{true: "Yes", false: "No"}[t.HasStart], true)
-		
+
 		if t.HasStart {
 			ui += renderRow(3, "Start Time", formatTime24(t.StartMin), false)
 			ui += renderRow(4, "Duration", formatTime24(t.DurationMin), false)
@@ -840,7 +890,7 @@ func (m model) View() string {
 				ui += renderRow(6, "Deadline Time", formatTime24(t.DeadlineMin), false)
 			}
 		}
-		
+
 		idxRep := 3
 		if t.HasStart {
 			idxRep = 6
@@ -848,7 +898,7 @@ func (m model) View() string {
 				idxRep = 7
 			}
 		}
-		
+
 		rStr := []string{"None", "Interval", "Weekly", "After Done"}[t.RepeatType]
 		ui += "\n" + renderRow(idxRep, "Repeat Type", rStr, true)
 		if t.RepeatType > 0 {
@@ -857,12 +907,15 @@ func (m model) View() string {
 
 		elap := getElapsedSec(t)
 		timeStr := fmt.Sprintf("%02d:%02d:%02d", elap/3600, (elap%3600)/60, elap%60)
-		ui += fmt.Sprintf("\n%s\n", lipgloss.PlaceHorizontal(54, lipgloss.Center, dimText.Render("Elapsed Time      : "+timeStr)))
-		ui += lipgloss.PlaceHorizontal(54, lipgloss.Center, dimText.Render("[i/Enter] Edit  [Esc] Back  [h/l] +/-  [q] Save"))
+		ui += fmt.Sprintf("\n%s\n", lipgloss.PlaceHorizontal(editPanelW, lipgloss.Center, dimText.Render("Elapsed Time      : "+timeStr)))
+		ui += lipgloss.PlaceHorizontal(editPanelW, lipgloss.Center, dimText.Render("[i/Enter] Edit  [Esc] Back  [h/l] +/-  [q] Save"))
 
 	case statePomodoro:
 		tName := m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx].Name
-		ui = hlWhite.Render("Task: "+tName) + "\n\n"
+		safeName := truncateStr(tName, clamp(m.width-10, 20, 60))
+		ui = hlWhite.Render("Task: "+safeName) + "\n\n"
+		
+		boxW := clamp(m.width/2, 26, 40)
 		items := []string{
 			"Start Timer",
 			fmt.Sprintf("Work: < %d > min", m.workTime),
@@ -870,9 +923,9 @@ func (m model) View() string {
 			fmt.Sprintf("Eye Break: < %v >", map[bool]string{true: "ON", false: "OFF"}[m.eyeBreakEnabled]),
 		}
 		for i, text := range items {
-			style := baseStyle.Copy().Width(30).Height(3)
+			style := baseStyle.Copy().Width(boxW).Height(3)
 			if i == m.pomoSel {
-				style = activeStyle.Copy().Width(30).Height(3)
+				style = activeStyle.Copy().Width(boxW).Height(3)
 			}
 			ui += style.Render(text) + "\n"
 		}
@@ -888,39 +941,47 @@ func (m model) View() string {
 			if m.isPomoPaused {
 				phase += " (PAUSED)"
 			}
-			
+
 			h, mRem, s := m.timeRemaining/3600, (m.timeRemaining%3600)/60, m.timeRemaining%60
 			ui = hlWhite.Render(phase) + "\n\n" + fmt.Sprintf("%02d:%02d:%02d", h, mRem, s) + "\n\n"
-			
+
 			total := m.workTime * 60
 			if !m.isWorkPhase {
 				total = m.breakTime * 60
 			}
-			
+
+			// Progress bar Responsive
+			barW := clamp(m.width-16, 20, 80) 
 			pct := 1.0 - (float64(m.timeRemaining) / float64(max(1, total)))
-			filled := int(pct * 40)
+			filled := int(pct * float64(barW))
 			bar := ""
-			for i := 0; i < 40; i++ {
+			for i := 0; i < barW; i++ {
 				if i < filled {
 					bar += "█"
 				} else {
 					bar += "─"
 				}
 			}
-			ui += dimText.Render("┌────────────────────────────────────────┐\n")
+			
+			// Sinh viền trên dưới cho thanh loading
+			topBorder := "┌" + strings.Repeat("─", barW) + "┐\n"
+			botBorder := "└" + strings.Repeat("─", barW) + "┘\n\n"
+
+			ui += dimText.Render(topBorder)
 			ui += dimText.Render("│") + hlWhite.Render(bar) + dimText.Render("│\n")
-			ui += dimText.Render("└────────────────────────────────────────┘\n\n")
+			ui += dimText.Render(botBorder)
 			ui += dimText.Render("[s] Pause/Resume  [c] Cancel  [q] Background")
 		}
 
 	case stateInfo:
-		contentWidth := 58 
+		contentWidth := clamp(m.width-10, 40, 70)
 		title := lipgloss.PlaceHorizontal(contentWidth, lipgloss.Center, hlWhite.Render("MANUAL & KEYBINDS")) + "\n\n"
-		
+
 		renderSection := func(name string, items [][]string) string {
 			res := lipgloss.PlaceHorizontal(contentWidth, lipgloss.Center, hlWhite.Render(name)) + "\n"
+			leftW := (contentWidth / 2) - 4
 			for _, item := range items {
-				left := lipgloss.NewStyle().Width(24).Align(lipgloss.Right).Render(item[0])
+				left := lipgloss.NewStyle().Width(leftW).Align(lipgloss.Right).Render(item[0])
 				res += fmt.Sprintf("%s  :  %s\n", left, item[1])
 			}
 			return res + "\n"
@@ -937,25 +998,24 @@ func (m model) View() string {
 				{"t", "Jump to Today"},
 				{"a", "Add a new task"},
 				{"s", "Start / Pause"},
-				{"d / D / X", "Done / Skip / Del Series"},
+				{"d / D / X", "Done / Skip / Del"},
 				{"p", "Attach Pomodoro"},
 			}) +
 			renderSection("[ Editor & Pomodoro ]", [][]string{
 				{"i / Enter", "Edit field"},
 				{"h/H or l/L", "Adjust time"},
-				{"s / c (Pomo)", "Pause / Cancel"},
+				{"s / c", "Pause / Cancel"},
 			})
 
-		ui = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(dimGray).Foreground(dimGray).Width(64).Padding(1, 2).Align(lipgloss.Left).Render(content)
+		ui = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(dimGray).Foreground(dimGray).
+			Width(contentWidth+4).Padding(1, 2).Align(lipgloss.Left).Render(content)
 	}
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, ui)
 }
 
 func max(a, b int) int {
-	if a > b {
-		return a
-	}
+	if a > b { return a }
 	return b
 }
 
@@ -965,8 +1025,7 @@ func (m model) startInsertMode() model {
 	m.state = stateTaskEdit
 	m.taskSelIdx = len(m.tasksDB[m.selectedDate]) - 1
 	m.editSelIdx = 0
-	
-	// Khi Add Task mới, tự động pop-up nhập tên luôn cho mượt
+
 	m.isInsertMode = true
 	m.textInput.Reset()
 	return m
@@ -1017,7 +1076,7 @@ func (m model) markTaskDone() model {
 	if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == m.taskSelIdx {
 		m.isPomoActive = false
 	}
-	
+
 	if t.RepeatType == 3 {
 		nDays, _ := strconv.Atoi(t.RepeatVal)
 		if nDays <= 0 {
