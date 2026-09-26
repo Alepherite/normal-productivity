@@ -12,9 +12,9 @@ A terminal-based productivity suite written in Go using the Charm Bubble Tea lib
   - Granular task statuses: Pending, Active, Paused, Completed, and Skipped.
   - Live completion percentage based on tracked vs. estimated duration.
 - **Flexible Recurrence Logic**:
-  - Interval-based (every $N$ days).
+  - Interval-based (every N days).
   - Specific day-of-week selection.
-  - Dynamic "After Done" recurrence (reschedules $N$ days after completion).
+  - Dynamic "After Done" recurrence (reschedules N days after completion).
 - **Integrated Pomodoro Engine**:
   - Customizable Work and Break intervals.
   - 20-20-20 Eye Rest Rule enforcement (triggers a 20-second break every 20 minutes).
@@ -25,30 +25,64 @@ A terminal-based productivity suite written in Go using the Charm Bubble Tea lib
 
 ---
 
-## Architecture
+## Prerequisites & Dependencies
 
-The project is structured into two core components:
+`normal-productivity` requires the Go toolchain, a C compiler for `go-sqlite3` CGO binding, SQLite development libraries, Make, and `libnotify` for desktop alerts.
 
-1. `tui.go`: Handles the Bubble Tea model state machine (`stateMainMenu`, `stateSchedule`, `stateTaskEdit`, `statePomodoro`, `statePomodoroRun`, `stateInfo`), user input events, dynamic Lip Gloss rendering, and UI scaling logic.
-2. `logic.go`: Manages SQLite database operations, task recurrence parsing, background tick calculations, and `notify-send` system calls.
+Select your Linux distribution below to install all required dependencies:
+
+### Debian / Ubuntu
+
+```bash
+sudo apt update
+sudo apt install build-essential golang libsqlite3-dev libnotify-bin make
+```
+
+### Fedora
+
+```bash
+sudo dnf install gcc golang sqlite-devel libnotify make
+```
+
+### Arch Linux
+
+```bash
+sudo pacman -S base-devel go sqlite libnotify
+```
+
+### Void Linux
+
+```bash
+sudo xbps-install -S base-devel go sqlite-devel libnotify
+```
 
 ---
 
-## Prerequisites
+## Installation & Uninstallation
 
-Before building `normal-productivity`, ensure you have the following installed on your system:
+### Automated Script Installation
 
-- **Go**: Version 1.18 or higher.
-- **SQLite3 Development Libraries**: Required for CGO compilation with `go-sqlite3` (e.g., `libsqlite3-dev` on Debian/Ubuntu or `sqlite` on Arch Linux).
-- **libnotify**: Provides the `notify-send` executable for Linux desktop notifications.
-- **Make**: Standard build tool to run project automation tasks.
-- **Air** *(Optional)*: Live-reload engine for Go development (`go install github.com/air-verse/air@latest`).
+You can install or remove the application directly using the included shell scripts.
+
+To install the application binary to your system path:
+
+```bash
+chmod +x install.sh
+./install.sh
+```
+
+To uninstall and remove binary artifacts:
+
+```bash
+chmod +x uninstall.sh
+./uninstall.sh
+```
 
 ---
 
-## Building & Running
+## Building & Running via Make
 
-### Using Make
+You can also use the `Makefile` directly to build, run, develop, or clean the project binaries.
 
 1. Clone the repository:
    ```bash
@@ -60,7 +94,7 @@ Before building `normal-productivity`, ensure you have the following installed o
    ```bash
    make build
    ```
-   *The binary will be generated in the `build/` directory.*
+   *The executable binary will be generated at `build/my_tui_app`.*
 
 3. Run the application:
    ```bash
@@ -77,20 +111,20 @@ Before building `normal-productivity`, ensure you have the following installed o
    make clean
    ```
 
-### Manual Compilation
+---
 
-Alternatively, you can compile and run directly with Go:
+## Architecture
 
-```bash
-go build -o build/normal-productivity .
-./build/normal-productivity
-```
+The project is structured into two core components:
+
+1. `tui.go`: Handles the Bubble Tea model state machine (`stateMainMenu`, `stateSchedule`, `stateTaskEdit`, `statePomodoro`, `statePomodoroRun`, `stateInfo`), user input events, dynamic Lip Gloss rendering, and UI scaling logic.
+2. `logic.go`: Manages SQLite database operations, task recurrence parsing, background tick calculations, and `notify-send` system calls.
 
 ---
 
 ## Usage & Keybindings
 
-Launch the application via `make run` or directly executing `./build/normal-productivity`.
+Launch the application via `make run` or by executing `./build/my_tui_app`.
 
 ### Navigation & Global Controls
 
