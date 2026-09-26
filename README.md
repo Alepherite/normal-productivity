@@ -1,183 +1,140 @@
-# normal-productivity
+# Normal Productivity
 
-A lightweight, efficient Terminal User Interface (TUI) application written in Go, designed to help you manage personal tasks, track recurring habits, and integrate a Pomodoro timer directly within your Linux workspace.
-
----
-
-## Introduction
-
-`normal-productivity` combines a weekly schedule board, daily task lists, a recurring task system (series/instances), and a Pomodoro timer with automatic eye break reminders. The application integrates directly with the Linux desktop notification daemon (`notify-send`) to deliver timely reminders.
+A terminal-based productivity suite written in Go using the Charm Bubble Tea library. It combines a 7-day weekly task planner, time tracking, customizable task recurrence, desktop reminders, and an integrated Pomodoro timer with eye-rest features into a responsive TUI.
 
 ---
 
-## Core Features
+## Features
 
-- **Weekly Schedule Management:** Easily navigate and switch between days of the week.
-- **Recurring Tasks:**
-  - Single (No repeat).
-  - Interval (Repeat every X days).
-  - Weekly (Repeat on specific days of the week).
-  - After Done (Spawn the next instance only after the current one is completed).
-- **Integrated Pomodoro Timer:**
-  - Customizable work and break durations.
-  - Automatic state switching between work and rest.
-  - Eye Break reminders (20-20-20 rule) based on elapsed screen time.
-  - Runs in the background while keeping task elapsed time updated.
-- **Smart Time Parsing:** Flexibly supports input formats like `14 30`, `14:30`, or just `14` which automatically converts to minutes.
-- **System Notifications:** Sends desktop notifications directly via the Linux notification server when it's time to work or switch Pomodoro phases.
-- **Local Storage:** Utilizes a SQLite3 database stored in the standard XDG path (`~/.local/share/normal-productivity/tasks.db`).
-
----
-
-## Dependencies
-
-To compile and run this application, your system needs the following:
-1. **Go Toolchain** (to compile the application).
-2. **C Compiler / Build tools** (required by the SQLite3 CGO driver).
-3. **libnotify** (provides the `notify-send` command for notifications).
-
-Below are the installation commands for various Linux distributions:
-
-### Arch Linux
-
-```bash
-sudo pacman -S go base-devel libnotify
-```
-
-### Debian / Ubuntu
-
-```bash
-sudo apt update
-sudo apt install -y golang build-essential libnotify-bin
-```
-
-### Fedora
-
-```bash
-sudo dnf install -y golang gcc libnotify
-```
-
-### Void Linux
-
-```bash
-sudo xbps-install -Sy go base-devel libnotify
-```
+- **Weekly Planner Grid**: Responsive 7-day calendar view with date navigation, current-day highlighting, and daily task counts.
+- **Task Management**:
+  - Timed tasks with start times, duration tracking, and custom deadlines.
+  - Granular task statuses: Pending, Active, Paused, Completed, and Skipped.
+  - Live completion percentage based on tracked vs. estimated duration.
+- **Flexible Recurrence Logic**:
+  - Interval-based (every $N$ days).
+  - Specific day-of-week selection.
+  - Dynamic "After Done" recurrence (reschedules $N$ days after completion).
+- **Integrated Pomodoro Engine**:
+  - Customizable Work and Break intervals.
+  - 20-20-20 Eye Rest Rule enforcement (triggers a 20-second break every 20 minutes).
+  - Automatic status and elapsed time sync with the target task.
+- **Desktop Notifications**: Uses system-native `notify-send` for scheduled reminders and Pomodoro phase changes.
+- **Local SQLite Persistence**: Automatic storage management under `~/.local/share/normal-productivity/tasks.db`.
+- **Responsive Layout**: Dynamic UI scaling that adapts to terminal resizing with minimum window size safety checks.
 
 ---
 
-## Installation and Usage
+## Architecture
 
-### 1. Development Mode (Run directly)
+The project is structured into two core components:
 
-Run the program immediately without installing it into the system:
-
-```bash
-make run
-```
-
-Or using the Go command directly:
-
-```bash
-go run .
-```
+1. `tui.go`: Handles the Bubble Tea model state machine (`stateMainMenu`, `stateSchedule`, `stateTaskEdit`, `statePomodoro`, `statePomodoroRun`, `stateInfo`), user input events, dynamic Lip Gloss rendering, and UI scaling logic.
+2. `logic.go`: Manages SQLite database operations, task recurrence parsing, background tick calculations, and `notify-send` system calls.
 
 ---
 
-### 2. Install via Makefile (Recommended)
+## Prerequisites
 
-The default target will compile the binary and place it in `~/.local/bin/` (the standard user-space binary path on Linux).
+Before building `normal-productivity`, ensure you have the following installed on your system:
 
-Install for the current user (No sudo required):
-
-```bash
-make install
-```
-
-Install system-wide:
-
-```bash
-PREFIX=/usr/local sudo make install
-```
+- **Go**: Version 1.18 or higher.
+- **SQLite3 Development Libraries**: Required for CGO compilation with `go-sqlite3` (e.g., `libsqlite3-dev` on Debian/Ubuntu or `sqlite` on Arch Linux).
+- **libnotify**: Provides the `notify-send` executable for Linux desktop notifications.
 
 ---
 
-### 3. Install / Uninstall via Scripts
+## Installation
 
-If provided with installation scripts:
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/your-username/normal-productivity.git
+   cd normal-productivity
+   ```
 
-**Installation (`./install.sh`):**
+2. Download Go dependencies:
+   ```bash
+   go mod download
+   ```
 
-```bash
-chmod +x install.sh
-./install.sh
-```
+3. Build the executable:
+   ```bash
+   go build -o normal-productivity .
+   ```
 
-**Uninstallation (`./uninstall.sh`):**
-
-```bash
-chmod +x uninstall.sh
-./uninstall.sh
-```
-
----
-
-### 4. Uninstall via Makefile
-
-```bash
-make uninstall
-```
-
-Or if you installed it system-wide as root:
-
-```bash
-PREFIX=/usr/local sudo make uninstall
-```
+4. (Optional) Install system-wide:
+   ```bash
+   sudo mv normal-productivity /usr/local/bin/
+   ```
 
 ---
 
-## Controls & Keybindings
+## Usage & Keybindings
 
-### General Navigation
+Launch the application by running:
 
-- `j` / `Down Arrow`: Move down.
-- `k` / `Up Arrow`: Move up.
-- `Enter` / `Space`: Select / Focus on list.
-- `q` / `Esc`: Go back / Cancel / Exit.
-- `Ctrl + c`: Force quit the application.
+```bash
+normal-productivity
+```
 
-### Schedule & Task List
+### Navigation & Global Controls
 
-- `h` / `Left Arrow`: Move to the previous day.
-- `l` / `Right Arrow`: Move to the next day.
-- `t`: Jump to Today.
-- `a`: Add a new task.
-- `s`: Start / Pause the timer for the selected task.
-- `d`: Mark task as Done.
-- `D` / `X`: Skip or Delete the recurring series.
-- `p`: Attach Pomodoro timer to the selected task.
+| Key | Context | Action |
+| --- | --- | --- |
+| `j` / `Down` | Global | Navigate down |
+| `k` / `Up` | Global | Navigate up |
+| `Enter` / `Space` | Global | Select option / Focus panel |
+| `Esc` / `q` | Global | Return to previous menu / Exit application |
+| `Ctrl + C` | Global | Force quit application |
+
+### Schedule View
+
+| Key | Action |
+| --- | --- |
+| `h` / `Left` | Move to previous day (auto-paginates week if needed) |
+| `l` / `Right` | Move to next day (auto-paginates week if needed) |
+| `t` | Jump directly to today |
+| `a` | Add a new task for the selected day |
+| `s` | Start / Pause tracking for the selected task |
+| `d` | Mark task as completed |
+| `D` | Skip task instance |
+| `X` | Delete recurring task series |
+| `p` | Attach Pomodoro timer to selected task |
 
 ### Task Editor
 
-- `i` / `Enter`: Edit the currently selected field.
-- `h` / `l`: Decrease / Increase time (5-minute intervals).
-- `H` / `L`: Decrease / Increase time (60-minute intervals).
-- `q`: Save changes and return to the schedule.
-- `Esc`: Discard changes and return to the schedule.
+| Key | Action |
+| --- | --- |
+| `i` / `Enter` | Edit selected field or enter text input mode |
+| `h` / `l` | Decrease / Increase time fields by 5 minutes |
+| `H` / `L` | Decrease / Increase time fields by 60 minutes |
+| `q` | Save task updates and exit editor |
+| `Esc` | Cancel editing and discard unsaved changes |
 
 ### Pomodoro Timer
 
-- `s`: Pause / Resume the countdown.
-- `c`: Cancel the current Pomodoro session.
-- `q`: Let the Pomodoro run in the background and return to the schedule.
+| Key | Action |
+| --- | --- |
+| `s` | Pause / Resume current Pomodoro session |
+| `c` | Cancel active Pomodoro session |
+| `q` | Run Pomodoro session in the background |
 
 ---
 
 ## Data Storage
 
-All task lists and progress data are automatically saved locally at:
+All local task definitions and instance states are saved in SQLite format at:
 
-```text
+```
 ~/.local/share/normal-productivity/tasks.db
 ```
 
-If you need to back up your data, simply copy the `tasks.db` file to a secure location.
+The database utilizes two main tables:
+- `series`: Stores primary task definitions, time metadata, and recurrence configurations.
+- `instances`: Stores daily execution metrics, statuses, and elapsed tracking time per task.
+
+---
+
+## License
+
+This project is licensed under the MIT License. See the `LICENSE` file for details.
