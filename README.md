@@ -25,106 +25,100 @@ A terminal-based productivity suite written in Go using the Charm Bubble Tea lib
 
 ---
 
-## Prerequisites & Dependencies
+## Getting Started
+
+Follow these steps to set up, build, and run `normal-productivity` on your system.
+
+### 1. Install Prerequisites & Dependencies
 
 `normal-productivity` requires the Go toolchain, a C compiler for `go-sqlite3` CGO binding, SQLite development libraries, Make, and `libnotify` for desktop alerts.
 
 Select your Linux distribution below to install all required dependencies:
 
-### Debian / Ubuntu
-
+#### Debian / Ubuntu
 ```bash
 sudo apt update
 sudo apt install build-essential golang libsqlite3-dev libnotify-bin make
 ```
 
-### Fedora
-
+#### Fedora
 ```bash
 sudo dnf install gcc golang sqlite-devel libnotify make
 ```
 
-### Arch Linux
-
+#### Arch Linux
 ```bash
 sudo pacman -S base-devel go sqlite libnotify
 ```
 
-### Void Linux
-
+#### Void Linux
 ```bash
 sudo xbps-install -S base-devel go sqlite-devel libnotify
 ```
 
 ---
 
-## Installation & Uninstallation
+### 2. Clone the Repository
 
-### Automated Script Installation
+Once dependencies are installed, clone the repository and navigate into the project directory:
 
-You can install or remove the application directly using the included shell scripts.
+```bash
+git clone https://github.com/Alepherite/normal-productivity.git
+cd normal-productivity
+```
 
-To install the application binary to your system path:
+---
+
+### 3. Installation & Building
+
+You can choose one of two ways to install or run the application:
+
+#### Option A: Quick Script Installation (Recommended)
+
+To install the application binary directly to your system path (`/usr/local/bin`):
 
 ```bash
 chmod +x install.sh
 ./install.sh
 ```
 
-To uninstall and remove binary artifacts:
+To remove the binary later:
 
 ```bash
 chmod +x uninstall.sh
 ./uninstall.sh
 ```
 
----
+#### Option B: Building & Running via Make
 
-## Building & Running via Make
+If you prefer building locally or working in development mode:
 
-You can also use the `Makefile` directly to build, run, develop, or clean the project binaries.
+- **Build binary**:
+  ```bash
+  make build
+  ```
+  *The executable will be generated at `build/normal-productivity`.*
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/Alepherite/normal-productivity.git
-   cd normal-productivity
-   ```
+- **Run directly via Make**:
+  ```bash
+  make run
+  ```
 
-2. Build the binary:
-   ```bash
-   make build
-   ```
-   *The executable binary will be generated at `build/normal-productivity`.*
+- **Development mode with live reloading** (requires `air`):
+  ```bash
+  make dev
+  ```
 
-3. Run the application:
-   ```bash
-   make run
-   ```
-
-4. Development mode with live reloading (requires `air`):
-   ```bash
-   make dev
-   ```
-
-5. Clean build artifacts:
-   ```bash
-   make clean
-   ```
-
----
-
-## Architecture
-
-The project is structured into two core components:
-
-1. `tui.go`: Handles the Bubble Tea model state machine (`stateMainMenu`, `stateSchedule`, `stateTaskEdit`, `statePomodoro`, `statePomodoroRun`, `stateInfo`), user input events, dynamic Lip Gloss rendering, and UI scaling logic.
-2. `logic.go`: Manages SQLite database operations, task recurrence parsing, background tick calculations, and `notify-send` system calls.
+- **Clean build artifacts**:
+  ```bash
+  make clean
+  ```
 
 ---
 
 ## Usage & Keybindings
 
-Launch the application via `make run` or by executing `./build/normal-productivity`.
+Launch the application using `normal-productivity` (if installed globally), `./build/normal-productivity`, or via `make run`.
 
 ### Navigation & Global Controls
 
@@ -170,6 +164,15 @@ Launch the application via `make run` or by executing `./build/normal-productivi
 
 ---
 
+## Architecture
+
+The project is structured into two core components:
+
+1. `tui.go`: Handles the Bubble Tea model state machine (`stateMainMenu`, `stateSchedule`, `stateTaskEdit`, `statePomodoro`, `statePomodoroRun`, `stateInfo`), user input events, dynamic Lip Gloss rendering, and UI scaling logic.
+2. `logic.go`: Manages SQLite database operations, task recurrence parsing, background tick calculations, and `notify-send` system calls.
+
+---
+
 ## Data Storage
 
 All local task definitions and instance states are saved in SQLite format at:
@@ -187,4 +190,3 @@ The database utilizes two main tables:
 ## License
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
-
