@@ -94,7 +94,7 @@ You can also use the `Makefile` directly to build, run, develop, or clean the pr
    ```bash
    make build
    ```
-   *The executable binary will be generated at `build/my_tui_app`.*
+   *The executable binary will be generated at `build/normal-productivity`.*
 
 3. Run the application:
    ```bash
@@ -124,7 +124,7 @@ The project is structured into two core components:
 
 ## Usage & Keybindings
 
-Launch the application via `make run` or by executing `./build/my_tui_app`.
+Launch the application via `make run` or by executing `./build/normal-productivity`.
 
 ### Navigation & Global Controls
 

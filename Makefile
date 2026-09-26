@@ -1,6 +1,6 @@
 .PHONY: all build run clean dev help
 
-APP_NAME  ?= my_tui_app
+APP_NAME  ?= normal-productivity
 BUILD_DIR ?= build
 
 # Automatically find all .go files for accurate dependency tracking
