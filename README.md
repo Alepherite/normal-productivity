@@ -36,22 +36,26 @@ Follow these steps to set up, build, and run `normal-productivity` on your syste
 Select your Linux distribution below to install all required dependencies:
 
 #### Debian / Ubuntu
+
 ```bash
 sudo apt update
 sudo apt install build-essential golang libsqlite3-dev libnotify-bin make
 ```
 
 #### Fedora
+
 ```bash
 sudo dnf install gcc golang sqlite-devel libnotify make
 ```
 
 #### Arch Linux
+
 ```bash
 sudo pacman -S base-devel go sqlite libnotify
 ```
 
 #### Void Linux
+
 ```bash
 sudo xbps-install -S base-devel go sqlite-devel libnotify
 ```
@@ -75,14 +79,16 @@ You can choose one of two ways to install or run the application:
 
 #### Option A: Quick Script Installation (Recommended)
 
-To install the application binary directly to your system path (`/usr/local/bin`):
+To install the application binary directly to your local user binary directory (`~/.local/bin`):
 
 ```bash
 chmod +x install.sh
 ./install.sh
 ```
 
-To remove the binary later:
+> **Note**: Ensure `~/.local/bin` is in your environment `PATH`. If it isn't, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.).
+
+To uninstall and remove binary artifacts:
 
 ```bash
 chmod +x uninstall.sh
@@ -93,23 +99,23 @@ chmod +x uninstall.sh
 
 If you prefer building locally or working in development mode:
 
-- **Build binary**:
+* **Build binary**:
   ```bash
   make build
   ```
   *The executable will be generated at `build/normal-productivity`.*
 
-- **Run directly via Make**:
+* **Run directly via Make**:
   ```bash
   make run
   ```
 
-- **Development mode with live reloading** (requires `air`):
+* **Development mode with live reloading** (requires `air`):
   ```bash
   make dev
   ```
 
-- **Clean build artifacts**:
+* **Clean build artifacts**:
   ```bash
   make clean
   ```
@@ -118,7 +124,7 @@ If you prefer building locally or working in development mode:
 
 ## Usage & Keybindings
 
-Launch the application using `normal-productivity` (if installed globally), `./build/normal-productivity`, or via `make run`.
+Launch the application using `normal-productivity` (if installed via script), `./build/normal-productivity`, or via `make run`.
 
 ### Navigation & Global Controls
 
