@@ -3,7 +3,7 @@
 # Exit immediately if a command exits with a non-zero status
 set -e
 
-APP_NAME="my_tui_app"
+APP_NAME="normal-productivity"
 BUILD_DIR="build"
 INSTALL_DIR="$HOME/.local/bin"
 

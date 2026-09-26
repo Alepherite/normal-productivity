@@ -1,4 +1,4 @@
-module my_tui_app
+module normal-productivity 
 
 go 1.27.1
 
