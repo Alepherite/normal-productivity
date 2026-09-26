@@ -41,10 +41,14 @@ Before building `normal-productivity`, ensure you have the following installed o
 - **Go**: Version 1.18 or higher.
 - **SQLite3 Development Libraries**: Required for CGO compilation with `go-sqlite3` (e.g., `libsqlite3-dev` on Debian/Ubuntu or `sqlite` on Arch Linux).
 - **libnotify**: Provides the `notify-send` executable for Linux desktop notifications.
+- **Make**: Standard build tool to run project automation tasks.
+- **Air** *(Optional)*: Live-reload engine for Go development (`go install github.com/air-verse/air@latest`).
 
 ---
 
-## Installation
+## Building & Running
+
+### Using Make
 
 1. Clone the repository:
    ```bash
@@ -52,30 +56,41 @@ Before building `normal-productivity`, ensure you have the following installed o
    cd normal-productivity
    ```
 
-2. Download Go dependencies:
+2. Build the binary:
    ```bash
-   go mod download
+   make build
+   ```
+   *The binary will be generated in the `build/` directory.*
+
+3. Run the application:
+   ```bash
+   make run
    ```
 
-3. Build the executable:
+4. Development mode with live reloading (requires `air`):
    ```bash
-   go build -o normal-productivity .
+   make dev
    ```
 
-4. (Optional) Install system-wide:
+5. Clean build artifacts:
    ```bash
-   sudo mv normal-productivity /usr/local/bin/
+   make clean
    ```
+
+### Manual Compilation
+
+Alternatively, you can compile and run directly with Go:
+
+```bash
+go build -o build/normal-productivity .
+./build/normal-productivity
+```
 
 ---
 
 ## Usage & Keybindings
 
-Launch the application by running:
-
-```bash
-normal-productivity
-```
+Launch the application via `make run` or directly executing `./build/normal-productivity`.
 
 ### Navigation & Global Controls
 
@@ -138,3 +153,4 @@ The database utilizes two main tables:
 ## License
 
 This project is licensed under the MIT License. See the `LICENSE` file for details.
+
