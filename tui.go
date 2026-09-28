@@ -20,10 +20,10 @@ const (
 	statePomodoro
 	statePomodoroRun
 	stateInfo
-	// --- Workout States ---
 	stateWorkoutMenu
 	stateWorkoutDay
 	stateWorkoutEditEx
+	stateWorkoutLogEdit
 )
 
 var (
@@ -33,16 +33,10 @@ var (
 	red     = lipgloss.Color("#FF5555")
 
 	baseStyle = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
-			BorderForeground(dimGray).
-			Foreground(dimGray).
-			Align(lipgloss.Center, lipgloss.Center)
+			Border(lipgloss.NormalBorder()).BorderForeground(dimGray).Foreground(dimGray).Align(lipgloss.Center, lipgloss.Center)
 
 	activeStyle = baseStyle.Copy().
-			Border(lipgloss.ThickBorder()).
-			BorderForeground(white).
-			Foreground(white).
-			Bold(true)
+			Border(lipgloss.ThickBorder()).BorderForeground(white).Foreground(white).Bold(true)
 
 	hlWhite     = lipgloss.NewStyle().Foreground(white).Bold(true)
 	dimText     = lipgloss.NewStyle().Foreground(dimGray)
@@ -62,7 +56,7 @@ type model struct {
 	currentWeekSun time.Time
 
 	mainSel       int
-	schedSelC      int
+	schedSelC     int
 	taskSelIdx    int
 	isTaskFocused bool
 	selectedDate  string
@@ -87,16 +81,22 @@ type model struct {
 	eyeBreakRemaining  int
 	pomoLastTick       time.Time
 
-	// --- Workout State ---
-	wkSelDay      int // 0-6 (Mon-Sun)
-	wkSelEx       int // Cursor bài tập hiện tại
-	wkExercises   map[int][]WorkoutExercise
-	wkLogs        map[string]map[int][]WorkoutLog // dateStr -> exerciseID -> []Logs
-	wkDateStr     string
-	wkPlanID      int
-	wkInputs      []textinput.Model
-	wkEditIdx     int
-	wkIsInsert    bool
+	wkSelDay    int
+	wkSelEx     int
+	wkExercises map[int][]WorkoutExercise
+	wkLogs      map[string]map[int][]WorkoutLog
+	wkDateStr   string
+	wkPlanID    int
+	wkInputs    []textinput.Model // Tăng lên 5 field
+	wkEditIdx   int
+	wkIsInsert  bool
+
+	wkLogInput   textinput.Model
+	wkIsResting  bool
+	wkRestRemain int
+	wkRestTotal  int
+	wkRestPaused bool
+	wkLastTick   time.Time
 }
 
 func initialModel() model {
@@ -108,12 +108,9 @@ func initialModel() model {
 	ti.Width = 38
 	ti.Focus()
 
-	now := time.Now()
-	sun := now.AddDate(0, 0, -int(now.Weekday()))
-
-	// Inputs cho Workout Edit
+	// [MỚI] 5 field cho Form thêm bài tập (Name, Sets, Weight, Reps, Rest)
 	var wkInps []textinput.Model
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 5; i++ {
 		t := textinput.New()
 		t.Prompt = "> "
 		t.PromptStyle = hlWhite
@@ -121,6 +118,16 @@ func initialModel() model {
 		t.Cursor.Style = reverseText
 		wkInps = append(wkInps, t)
 	}
+
+	logInput := textinput.New()
+	logInput.Prompt = "> "
+	logInput.Placeholder = "15 10"
+	logInput.PromptStyle = hlWhite
+	logInput.TextStyle = lipgloss.NewStyle().Foreground(white)
+	logInput.Cursor.Style = reverseText
+
+	now := time.Now()
+	sun := now.AddDate(0, 0, -int(now.Weekday()))
 
 	m := model{
 		state:           stateMainMenu,
@@ -131,6 +138,7 @@ func initialModel() model {
 		breakTime:       5,
 		eyeBreakEnabled: true,
 		wkInputs:        wkInps,
+		wkLogInput:      logInput,
 	}
 	m = m.reloadTasks()
 	m = m.reloadWorkout()
@@ -142,22 +150,45 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(textinput.Blink, doTick())
 }
 
+func (m model) logSetAndRest(ex WorkoutExercise, weight float64, reps int) model {
+	logs := m.wkLogs[m.wkDateStr][ex.ID]
+	currSet := len(logs) + 1
+	if currSet <= ex.TargetSets {
+		saveWorkoutLog(&WorkoutLog{
+			ExerciseID:  ex.ID,
+			DateStr:     m.wkDateStr,
+			SetIndex:    currSet,
+			WeightKg:    weight,
+			Reps:        reps,
+			CompletedAt: time.Now().Unix(),
+		})
+		m = m.reloadWorkout()
+		fmt.Print("\a")
+
+		m.wkIsResting = true
+		m.wkRestTotal = ex.RestSec
+		m.wkRestRemain = ex.RestSec
+		m.wkRestPaused = false
+		m.wkLastTick = time.Now()
+	}
+	return m
+}
+
 func (m model) reloadWorkout() model {
 	m.wkExercises = make(map[int][]WorkoutExercise)
 	m.wkLogs = make(map[string]map[int][]WorkoutLog)
 
-	// Load Exercises
-	rows, err := db.Query("SELECT id, plan_id, name, target_sets, rest_sec, sort_order FROM workout_exercises ORDER BY plan_id, sort_order, id ASC")
+	// [MỚI] Query thêm target_weight và target_reps
+	rows, err := db.Query("SELECT id, plan_id, name, target_sets, rest_sec, sort_order, target_weight, target_reps FROM workout_exercises ORDER BY plan_id, sort_order, id ASC")
 	if err == nil && rows != nil {
 		defer rows.Close()
 		for rows.Next() {
 			var e WorkoutExercise
-			rows.Scan(&e.ID, &e.PlanID, &e.Name, &e.TargetSets, &e.RestSec, &e.SortOrder)
+			rows.Scan(&e.ID, &e.PlanID, &e.Name, &e.TargetSets, &e.RestSec, &e.SortOrder, &e.TargetWeight, &e.TargetReps)
 			m.wkExercises[e.PlanID] = append(m.wkExercises[e.PlanID], e)
 		}
 	}
 
-	// Load Logs cho cả tuần hiện tại (từ Mon đến Sun)
 	mon := m.currentWeekSun.AddDate(0, 0, 1)
 	sun := m.currentWeekSun.AddDate(0, 0, 7)
 	lRows, err := db.Query("SELECT id, exercise_id, date_str, set_index, weight_kg, reps, completed_at FROM workout_logs WHERE date_str >= ? AND date_str <= ?", mon.Format("2006-01-02"), sun.Format("2006-01-02"))
@@ -194,9 +225,7 @@ func (m model) reloadTasks() model {
 			)
 
 			endLimit := limitFuture
-			if t.UntilDate != "" && t.UntilDate < limitFuture {
-				endLimit = t.UntilDate
-			}
+			if t.UntilDate != "" && t.UntilDate < limitFuture { endLimit = t.UntilDate }
 
 			currTm, _ := time.Parse("2006-01-02", t.CreatedDate)
 			interval := 1
@@ -204,18 +233,13 @@ func (m model) reloadTasks() model {
 
 			if t.RepeatType == 1 {
 				interval, _ = strconv.Atoi(t.RepeatVal)
-				if interval <= 0 {
-					interval = 1
-				}
+				if interval <= 0 { interval = 1 }
 			} else if t.RepeatType == 2 {
-				if t.RepeatVal == "" {
-					weekDays = append(weekDays, int(currTm.Weekday()))
+				if t.RepeatVal == "" { weekDays = append(weekDays, int(currTm.Weekday()))
 				} else {
 					for _, p := range strings.Split(t.RepeatVal, ",") {
 						w, err := strconv.Atoi(p)
-						if err == nil {
-							weekDays = append(weekDays, w)
-						}
+						if err == nil { weekDays = append(weekDays, w) }
 					}
 				}
 			}
@@ -223,26 +247,18 @@ func (m model) reloadTasks() model {
 			startOffset := 0
 			if t.CreatedDate < limitPast {
 				startOffset = int(windowStart.Sub(currTm).Hours() / 24)
-				if startOffset < 0 {
-					startOffset = 0
-				}
+				if startOffset < 0 { startOffset = 0 }
 			}
 
 			for i := startOffset; i <= startOffset+95; i++ {
 				nextTm := currTm.AddDate(0, 0, i)
 				nextDate := nextTm.Format("2006-01-02")
-				if nextDate > endLimit {
-					break
-				}
-				if nextDate < limitPast {
-					continue
-				}
+				if nextDate > endLimit { break }
+				if nextDate < limitPast { continue }
 
 				shouldSpawn := false
-				if t.RepeatType == 0 || t.RepeatType == 3 {
-					shouldSpawn = (i == 0)
-				} else if t.RepeatType == 1 && (i%interval == 0) {
-					shouldSpawn = true
+				if t.RepeatType == 0 || t.RepeatType == 3 { shouldSpawn = (i == 0)
+				} else if t.RepeatType == 1 && (i%interval == 0) { shouldSpawn = true
 				} else if t.RepeatType == 2 {
 					for _, wd := range weekDays {
 						if int(nextTm.Weekday()) == wd {
@@ -252,12 +268,8 @@ func (m model) reloadTasks() model {
 					}
 				}
 
-				if shouldSpawn {
-					tasksDB[nextDate] = append(tasksDB[nextDate], t)
-				}
-				if t.RepeatType == 0 || t.RepeatType == 3 {
-					break
-				}
+				if shouldSpawn { tasksDB[nextDate] = append(tasksDB[nextDate], t) }
+				if t.RepeatType == 0 || t.RepeatType == 3 { break }
 			}
 		}
 	}
@@ -310,6 +322,21 @@ func handleTick(m model) model {
 		}
 	}
 
+	if m.wkIsResting && !m.wkRestPaused {
+		delta := int(now.Sub(m.wkLastTick).Seconds())
+		if delta > 0 {
+			m.wkRestRemain -= delta
+			m.wkLastTick = now
+			if m.wkRestRemain <= 0 {
+				m.wkIsResting = false
+				notifySend("critical", "Workout", "Rest time is over! Get back to work.")
+				fmt.Print("\a")
+			}
+		}
+	} else {
+		m.wkLastTick = now
+	}
+
 	if m.isPomoActive && !m.isPomoPaused {
 		delta := int(now.Sub(m.pomoLastTick).Seconds())
 		if delta > 0 {
@@ -327,25 +354,18 @@ func handleTick(m model) model {
 				if prevElapsed >= 0 && (m.sessionTimeElapsed/1200) > (prevElapsed/1200) {
 					m.isEyeBreakActive = true
 					m.eyeBreakRemaining = 20
-					if m.state != statePomodoroRun {
-						m.state = statePomodoroRun
-					}
+					if m.state != statePomodoroRun { m.state = statePomodoroRun }
 				}
 			}
 			if m.isEyeBreakActive {
 				m.eyeBreakRemaining -= delta
-				if m.eyeBreakRemaining <= 0 {
-					m.isEyeBreakActive = false
-				}
+				if m.eyeBreakRemaining <= 0 { m.isEyeBreakActive = false }
 			}
 
 			if m.timeRemaining <= 0 {
 				m.isWorkPhase = !m.isWorkPhase
-				if m.isWorkPhase {
-					m.timeRemaining = m.workTime * 60
-				} else {
-					m.timeRemaining = m.breakTime * 60
-				}
+				if m.isWorkPhase { m.timeRemaining = m.workTime * 60
+				} else { m.timeRemaining = m.breakTime * 60 }
 				m.sessionTimeElapsed = 0
 				m.isEyeBreakActive = false
 
@@ -366,7 +386,7 @@ func handleTick(m model) model {
 				}
 				m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx] = t
 				saveInstance(t, m.pomoTaskDate)
-				fmt.Print("\a") // System beep
+				fmt.Print("\a") 
 			}
 		}
 	} else {
@@ -391,27 +411,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		k := msg.String()
-		if k == "ctrl+c" {
-			return m, tea.Quit
-		}
+		if k == "ctrl+c" { return m, tea.Quit }
 
 		m.selectedDate = m.currentWeekSun.AddDate(0, 0, m.schedSelC).Format("2006-01-02")
 		tasks := m.tasksDB[m.selectedDate]
 
 		switch m.state {
 		case stateMainMenu:
-			if k == "q" || k == "esc" {
-				return m, tea.Quit
-			}
+			if k == "q" || k == "esc" { return m, tea.Quit }
 			if k == "k" || k == "up" || k == "h" || k == "left" {
-				if m.mainSel > 0 {
-					m.mainSel--
-				}
+				if m.mainSel > 0 { m.mainSel-- }
 			}
 			if k == "j" || k == "down" || k == "l" || k == "right" {
-				if m.mainSel < 2 { // Giờ có 3 Menu
-					m.mainSel++
-				}
+				if m.mainSel < 2 { m.mainSel++ }
 			}
 			if k == "enter" || k == " " {
 				if m.mainSel == 0 {
@@ -431,59 +443,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 
 		case stateWorkoutMenu:
-			if k == "q" || k == "esc" {
-				m.state = stateMainMenu
-			}
-			if k == "j" || k == "down" {
-				if m.wkSelDay < 6 {
-					m.wkSelDay++
-				}
-			}
-			if k == "k" || k == "up" {
-				if m.wkSelDay > 0 {
-					m.wkSelDay--
-				}
-			}
+			if k == "q" || k == "esc" { m.state = stateMainMenu }
+			if k == "j" || k == "down" { if m.wkSelDay < 6 { m.wkSelDay++ } }
+			if k == "k" || k == "up" { if m.wkSelDay > 0 { m.wkSelDay-- } }
 			if k == "enter" || k == " " {
 				m.state = stateWorkoutDay
 				m.wkSelEx = 0
-				// Quy định Plan ID (2-5, 3-6, 4-7 giống nhau)
-				// wkSelDay: 0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun
 				pid := 0
-				if m.wkSelDay == 0 || m.wkSelDay == 3 { pid = 1 } // Push
-				if m.wkSelDay == 1 || m.wkSelDay == 4 { pid = 2 } // Pull
-				if m.wkSelDay == 2 || m.wkSelDay == 5 { pid = 3 } // Legs
+				if m.wkSelDay == 0 || m.wkSelDay == 3 { pid = 1 } 
+				if m.wkSelDay == 1 || m.wkSelDay == 4 { pid = 2 } 
+				if m.wkSelDay == 2 || m.wkSelDay == 5 { pid = 3 } 
 				m.wkPlanID = pid
 				m.wkDateStr = m.currentWeekSun.AddDate(0, 0, m.wkSelDay+1).Format("2006-01-02")
 			}
 
 		case stateWorkoutDay:
 			exList := m.wkExercises[m.wkPlanID]
-			if k == "q" || k == "esc" {
-				m.state = stateWorkoutMenu
-			}
-			if k == "j" || k == "down" {
-				if m.wkSelEx < len(exList)-1 {
-					m.wkSelEx++
-				}
-			}
-			if k == "k" || k == "up" {
-				if m.wkSelEx > 0 {
-					m.wkSelEx--
-				}
-			}
-			if k == "a" { // Add Exercise
+			
+			if k == "q" || k == "esc" { m.state = stateWorkoutMenu }
+			if k == "j" || k == "down" { if m.wkSelEx < len(exList)-1 { m.wkSelEx++ } }
+			if k == "k" || k == "up" { if m.wkSelEx > 0 { m.wkSelEx-- } }
+			
+			if k == "a" {
 				m.state = stateWorkoutEditEx
-				m.wkIsInsert = false // Start ở chế độ Form Menu thay vì Modal
+				m.wkIsInsert = false
 				m.wkEditIdx = 0
 				for i := range m.wkInputs {
 					m.wkInputs[i].Reset()
 					m.wkInputs[i].Blur()
 				}
-				m.wkInputs[1].SetValue("3")  // Default Sets
-				m.wkInputs[2].SetValue("90") // Fix bug: Default Rest(s) thay vì Reps
+				m.wkInputs[1].SetValue("3")  // Sets
+				m.wkInputs[2].SetValue("0")  // Weight
+				m.wkInputs[3].SetValue("10") // Reps
+				m.wkInputs[4].SetValue("90") // Rest
 			}
-			if k == "D" || k == "X" { // Delete Exercise
+			if k == "D" || k == "X" {
 				if len(exList) > 0 {
 					deleteWorkoutExercise(exList[m.wkSelEx].ID)
 					m = m.reloadWorkout()
@@ -492,113 +486,154 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			}
-			if k == " " || k == "enter" { // Tick hoàn thành 1 Set
+			if k == " " || k == "enter" {
+				// [MỚI] Dùng TargetWeight và TargetReps mặc định của bài tập
 				if len(exList) > 0 {
 					ex := exList[m.wkSelEx]
-					logs := m.wkLogs[m.wkDateStr][ex.ID]
-					currSet := len(logs) + 1
-					if currSet <= ex.TargetSets {
-						saveWorkoutLog(&WorkoutLog{
-							ExerciseID:  ex.ID,
-							DateStr:     m.wkDateStr,
-							SetIndex:    currSet,
-							WeightKg:    0, // Mặc định bodyweight
-							Reps:        10, // Mặc định reps, có thể đổi logic sau
-							CompletedAt: time.Now().Unix(),
-						})
-						fmt.Print("\a") // Beep
-						m = m.reloadWorkout()
-					}
+					m = m.logSetAndRest(ex, ex.TargetWeight, ex.TargetReps)
 				}
 			}
-			if k == "s" { // Skip/Finish Exercise (Tự fill đủ các set còn lại với 0 reps)
+			if k == "s" {
 				if len(exList) > 0 {
 					ex := exList[m.wkSelEx]
 					logs := m.wkLogs[m.wkDateStr][ex.ID]
 					for i := len(logs) + 1; i <= ex.TargetSets; i++ {
 						saveWorkoutLog(&WorkoutLog{
-							ExerciseID:  ex.ID,
-							DateStr:     m.wkDateStr,
-							SetIndex:    i,
-							WeightKg:    0,
-							Reps:        0,
-							CompletedAt: time.Now().Unix(),
+							ExerciseID: ex.ID, DateStr: m.wkDateStr, SetIndex: i,
+							WeightKg: 0, Reps: 0, CompletedAt: time.Now().Unix(),
 						})
 					}
 					m = m.reloadWorkout()
 				}
 			}
+			if k == "u" {
+				if len(exList) > 0 {
+					deleteLastWorkoutLog(exList[m.wkSelEx].ID, m.wkDateStr)
+					m = m.reloadWorkout()
+				}
+			}
+			if k == "R" {
+				if len(exList) > 0 {
+					resetWorkoutLogs(exList[m.wkSelEx].ID, m.wkDateStr)
+					m = m.reloadWorkout()
+					m.wkIsResting = false
+				}
+			}
+			if k == "e" {
+				// [MỚI] Sửa Set vừa tập gần nhất (chỉ kích hoạt nếu đã tập ít nhất 1 set)
+				if len(exList) > 0 {
+					ex := exList[m.wkSelEx]
+					logs := m.wkLogs[m.wkDateStr][ex.ID]
+					if len(logs) > 0 {
+						m.state = stateWorkoutLogEdit
+						lastLog := logs[len(logs)-1]
+						val := fmt.Sprintf("%d", lastLog.Reps)
+						if lastLog.WeightKg > 0 { val = fmt.Sprintf("%g %d", lastLog.WeightKg, lastLog.Reps) }
+						m.wkLogInput.SetValue(val)
+						m.wkLogInput.Focus()
+						m.wkLogInput.CursorEnd()
+					}
+				}
+			}
+			if m.wkIsResting {
+				if k == "p" {
+					m.wkRestPaused = !m.wkRestPaused
+					if !m.wkRestPaused { m.wkLastTick = time.Now() }
+				}
+				if k == "x" { m.wkIsResting = false }
+				if k == "r" { m.wkRestRemain = m.wkRestTotal; m.wkLastTick = time.Now() }
+			}
+
+		case stateWorkoutLogEdit:
+			if k == "esc" {
+				m.state = stateWorkoutDay
+			} else if k == "enter" {
+				// [MỚI] Cập nhật CSDL Set cuối cùng và KHÔNG kích hoạt timer
+				val := m.wkLogInput.Value()
+				parts := strings.Fields(val)
+				w, r := 0.0, 10
+				if len(parts) >= 2 {
+					w, _ = strconv.ParseFloat(parts[0], 64)
+					r, _ = strconv.Atoi(parts[1])
+				} else if len(parts) == 1 {
+					r, _ = strconv.Atoi(parts[0]) // Gõ 1 số là Reps
+				}
+				
+				exList := m.wkExercises[m.wkPlanID]
+				if len(exList) > 0 {
+					ex := exList[m.wkSelEx]
+					logs := m.wkLogs[m.wkDateStr][ex.ID]
+					if len(logs) > 0 {
+						lastLog := logs[len(logs)-1]
+						saveWorkoutLog(&WorkoutLog{
+							ExerciseID:  ex.ID,
+							DateStr:     m.wkDateStr,
+							SetIndex:    lastLog.SetIndex,
+							WeightKg:    w,
+							Reps:        r,
+							CompletedAt: lastLog.CompletedAt, // Giữ nguyên giờ tập cũ
+						})
+						m = m.reloadWorkout()
+					}
+				}
+				m.state = stateWorkoutDay
+			} else {
+				m.wkLogInput, cmd = m.wkLogInput.Update(msg)
+				cmds = append(cmds, cmd)
+			}
 
 		case stateWorkoutEditEx:
-			if m.wkIsInsert { // Đang ở trong Popup nhập Text riêng biệt
+			if m.wkIsInsert {
 				if k == "esc" || k == "enter" {
 					m.wkIsInsert = false
 					m.wkInputs[m.wkEditIdx].Blur()
+					if k == "esc" { m.wkEditIdx = 0 }
 				} else {
 					m.wkInputs[m.wkEditIdx], cmd = m.wkInputs[m.wkEditIdx].Update(msg)
 					cmds = append(cmds, cmd)
 				}
-			} else { // Ở chế độ duyệt Form List Menu
-				if k == "esc" {
-					m.state = stateWorkoutDay
-				}
-				if k == "q" { // Bấm q để Lưu bài tập
+			} else {
+				if k == "esc" { m.state = stateWorkoutDay }
+				if k == "q" {
 					name := m.wkInputs[0].Value()
 					if strings.TrimSpace(name) == "" { name = "New Exercise" }
-					
 					tSets, _ := strconv.Atoi(m.wkInputs[1].Value())
 					if tSets <= 0 { tSets = 1 }
-					
-					tRest, _ := strconv.Atoi(m.wkInputs[2].Value())
+					tWeight, _ := strconv.ParseFloat(m.wkInputs[2].Value(), 64)
+					if tWeight < 0 { tWeight = 0 }
+					tReps, _ := strconv.Atoi(m.wkInputs[3].Value())
+					if tReps <= 0 { tReps = 1 }
+					tRest, _ := strconv.Atoi(m.wkInputs[4].Value())
 					if tRest <= 0 { tRest = 90 }
 					
 					insertWorkoutExercise(&WorkoutExercise{
-						PlanID:     m.wkPlanID,
-						Name:       name,
-						TargetSets: tSets,
-						RestSec:    tRest, // Lưu đúng trường RestSec vào DB
+						PlanID: m.wkPlanID, Name: name, TargetSets: tSets,
+						TargetWeight: tWeight, TargetReps: tReps, RestSec: tRest,
 					})
 					m = m.reloadWorkout()
 					m.wkSelEx = len(m.wkExercises[m.wkPlanID]) - 1
 					m.state = stateWorkoutDay
 				}
-				if k == "j" || k == "down" {
-					m.wkEditIdx = min(2, m.wkEditIdx+1)
-				}
-				if k == "k" || k == "up" {
-					m.wkEditIdx = max(0, m.wkEditIdx-1)
-				}
-				if k == "enter" || k == " " { // Bấm Enter mở Popup text-input
+				if k == "j" || k == "down" { m.wkEditIdx = min(4, m.wkEditIdx+1) } // [MỚI] Tăng limit index
+				if k == "k" || k == "up" { m.wkEditIdx = max(0, m.wkEditIdx-1) }
+				if k == "enter" || k == " " {
 					m.wkIsInsert = true
 					m.wkInputs[m.wkEditIdx].Focus()
 					m.wkInputs[m.wkEditIdx].CursorEnd()
 				}
 			}
 
-		// --- KẾT THÚC WORKOUT LOGIC ---
-
+		// --- SCHEDULE & POMODORO (Giữ nguyên) ---
 		case stateSchedule:
 			if !m.isTaskFocused {
-				if k == "q" || k == "esc" {
-					m.state = stateMainMenu
-				}
+				if k == "q" || k == "esc" { m.state = stateMainMenu }
 				if k == "h" || k == "left" {
-					if m.schedSelC > 0 {
-						m.schedSelC--
-					} else {
-						m.schedSelC = 6
-						m.currentWeekSun = m.currentWeekSun.AddDate(0, 0, -7)
-						m = m.reloadTasks()
-					}
+					if m.schedSelC > 0 { m.schedSelC--
+					} else { m.schedSelC = 6; m.currentWeekSun = m.currentWeekSun.AddDate(0, 0, -7); m = m.reloadTasks() }
 				}
 				if k == "l" || k == "right" {
-					if m.schedSelC < 6 {
-						m.schedSelC++
-					} else {
-						m.schedSelC = 0
-						m.currentWeekSun = m.currentWeekSun.AddDate(0, 0, 7)
-						m = m.reloadTasks()
-					}
+					if m.schedSelC < 6 { m.schedSelC++
+					} else { m.schedSelC = 0; m.currentWeekSun = m.currentWeekSun.AddDate(0, 0, 7); m = m.reloadTasks() }
 				}
 				if k == "t" {
 					now := time.Now()
@@ -607,288 +642,140 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m = m.reloadTasks()
 				}
 				if k == "enter" || k == " " {
-					if len(m.tasksDB[m.currentWeekSun.AddDate(0, 0, m.schedSelC).Format("2006-01-02")]) > 0 {
-						m.isTaskFocused = true
-						m.taskSelIdx = 0
-					}
+					if len(m.tasksDB[m.currentWeekSun.AddDate(0, 0, m.schedSelC).Format("2006-01-02")]) > 0 { m.isTaskFocused = true; m.taskSelIdx = 0 }
 				}
-				if k == "a" {
-					m = m.startInsertMode()
-				}
+				if k == "a" { m = m.startInsertMode() }
 			} else {
-				if k == "q" || k == "esc" {
-					m.isTaskFocused = false
-				}
-				if k == "j" || k == "down" {
-					if m.taskSelIdx < len(tasks)-1 {
-						m.taskSelIdx++
-					}
-				}
-				if k == "k" || k == "up" {
-					if m.taskSelIdx > 0 {
-						m.taskSelIdx--
-					}
-				}
-				if k == "a" {
-					m = m.startInsertMode()
-				}
-				if k == "enter" {
-					m.state = stateTaskEdit
-					m.editSelIdx = 0
-				}
+				if k == "q" || k == "esc" { m.isTaskFocused = false }
+				if k == "j" || k == "down" { if m.taskSelIdx < len(tasks)-1 { m.taskSelIdx++ } }
+				if k == "k" || k == "up" { if m.taskSelIdx > 0 { m.taskSelIdx-- } }
+				if k == "a" { m = m.startInsertMode() }
+				if k == "enter" { m.state = stateTaskEdit; m.editSelIdx = 0 }
 				if k == "p" {
-					if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == m.taskSelIdx {
-						m.state = statePomodoroRun
+					if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == m.taskSelIdx { m.state = statePomodoroRun
 					} else {
-						m.pomoTaskDate = m.selectedDate
-						m.pomoTaskIdx = m.taskSelIdx
-						m.pomoTaskID = tasks[m.taskSelIdx].ID
-						m.state = statePomodoro
-						m.pomoSel = 0
+						m.pomoTaskDate = m.selectedDate; m.pomoTaskIdx = m.taskSelIdx; m.pomoTaskID = tasks[m.taskSelIdx].ID
+						m.state = statePomodoro; m.pomoSel = 0
 					}
 				}
-				if k == "s" {
-					m = m.toggleTaskState()
-				}
-				if k == "d" {
-					m = m.markTaskDone()
-				}
-				if k == "D" || k == "X" {
-					m = m.deleteTask(k == "X")
-				}
+				if k == "s" { m = m.toggleTaskState() }
+				if k == "d" { m = m.markTaskDone() }
+				if k == "D" || k == "X" { m = m.deleteTask(k == "X") }
 			}
 
 		case stateTaskEdit:
 			t := m.tasksDB[m.selectedDate][m.taskSelIdx]
 			maxFields := 3
-			if t.HasStart {
-				maxFields = 6
-				if t.HasCustomDeadline {
-					maxFields = 7
-				}
-			}
-			idxRepeat := maxFields
-			maxFields += 1
-			if t.RepeatType > 0 {
-				maxFields += 1
-			}
+			if t.HasStart { maxFields = 6; if t.HasCustomDeadline { maxFields = 7 } }
+			idxRepeat := maxFields; maxFields += 1; if t.RepeatType > 0 { maxFields += 1 }
 
 			if m.isInsertMode {
 				if k == "esc" || k == "enter" {
 					m.isInsertMode = false
 					val := m.textInput.Value()
 					if k == "enter" {
-						if m.editSelIdx == 0 && val != "" {
-							t.Name = val
-						} else if m.editSelIdx == 1 {
-							t.Desc = val
-						} else if m.editSelIdx == 3 {
-							t.StartMin = parseSmartTime(val, t.StartMin)
-						} else if m.editSelIdx == 4 {
-							t.DurationMin = parseSmartTime(val, t.DurationMin)
-						} else if m.editSelIdx == 6 {
-							t.DeadlineMin = parseSmartTime(val, t.DeadlineMin)
-						} else if m.editSelIdx == idxRepeat+1 {
-							t.RepeatVal = val
-						}
+						if m.editSelIdx == 0 && val != "" { t.Name = val
+						} else if m.editSelIdx == 1 { t.Desc = val
+						} else if m.editSelIdx == 3 { t.StartMin = parseSmartTime(val, t.StartMin)
+						} else if m.editSelIdx == 4 { t.DurationMin = parseSmartTime(val, t.DurationMin)
+						} else if m.editSelIdx == 6 { t.DeadlineMin = parseSmartTime(val, t.DeadlineMin)
+						} else if m.editSelIdx == idxRepeat+1 { t.RepeatVal = val }
 						m.tasksDB[m.selectedDate][m.taskSelIdx] = t
 					}
 				} else {
-					m.textInput, cmd = m.textInput.Update(msg)
-					cmds = append(cmds, cmd)
+					m.textInput, cmd = m.textInput.Update(msg); cmds = append(cmds, cmd)
 				}
 			} else {
-				if k == "esc" {
-					m = m.reloadTasks()
-					m.state = stateSchedule
-				}
+				if k == "esc" { m = m.reloadTasks(); m.state = stateSchedule }
 				if k == "q" {
-					if t.ID == 0 {
-						if t.Name != "New Task" || t.Desc != "" {
-							insertSeries(&t)
-						}
-					} else {
-						updateSeries(t)
-					}
-					m = m.reloadTasks()
-					m.state = stateSchedule
+					if t.ID == 0 { if t.Name != "New Task" || t.Desc != "" { insertSeries(&t) }
+					} else { updateSeries(t) }
+					m = m.reloadTasks(); m.state = stateSchedule
 				}
-				if k == "j" || k == "down" {
-					if m.editSelIdx < maxFields-1 {
-						m.editSelIdx++
-					}
-				}
-				if k == "k" || k == "up" {
-					if m.editSelIdx > 0 {
-						m.editSelIdx--
-					}
-				}
+				if k == "j" || k == "down" { if m.editSelIdx < maxFields-1 { m.editSelIdx++ } }
+				if k == "k" || k == "up" { if m.editSelIdx > 0 { m.editSelIdx-- } }
 				if k == "i" || k == "enter" || k == " " {
-					if m.editSelIdx == 2 {
-						t.HasStart = !t.HasStart
-					} else if m.editSelIdx == 5 && t.HasStart {
-						t.HasCustomDeadline = !t.HasCustomDeadline
+					if m.editSelIdx == 2 { t.HasStart = !t.HasStart
+					} else if m.editSelIdx == 5 && t.HasStart { t.HasCustomDeadline = !t.HasCustomDeadline
 					} else if m.editSelIdx == idxRepeat {
-						t.RepeatType = (t.RepeatType + 1) % 4
-						if t.RepeatType == 0 {
-							t.RepeatVal = ""
-						}
+						t.RepeatType = (t.RepeatType + 1) % 4; if t.RepeatType == 0 { t.RepeatVal = "" }
 					} else if m.editSelIdx == 0 || m.editSelIdx == 1 || m.editSelIdx == 3 || m.editSelIdx == 4 || m.editSelIdx == 6 || m.editSelIdx == idxRepeat+1 {
-						m.isInsertMode = true
-						m.textInput.Reset()
-						
-						if m.editSelIdx == 0 {
-							m.textInput.SetValue(t.Name)
-						} else if m.editSelIdx == 1 {
-							m.textInput.SetValue(t.Desc)
-						} else if m.editSelIdx == 3 {
-							m.textInput.SetValue(formatTime24(t.StartMin))
-						} else if m.editSelIdx == 4 {
-							m.textInput.SetValue(strconv.Itoa(t.DurationMin))
-						} else if m.editSelIdx == 6 {
-							m.textInput.SetValue(formatTime24(t.DeadlineMin))
-						} else if m.editSelIdx == idxRepeat+1 {
-							m.textInput.SetValue(t.RepeatVal)
-						}
+						m.isInsertMode = true; m.textInput.Reset()
+						if m.editSelIdx == 0 { m.textInput.SetValue(t.Name)
+						} else if m.editSelIdx == 1 { m.textInput.SetValue(t.Desc)
+						} else if m.editSelIdx == 3 { m.textInput.SetValue(formatTime24(t.StartMin))
+						} else if m.editSelIdx == 4 { m.textInput.SetValue(strconv.Itoa(t.DurationMin))
+						} else if m.editSelIdx == 6 { m.textInput.SetValue(formatTime24(t.DeadlineMin))
+						} else if m.editSelIdx == idxRepeat+1 { m.textInput.SetValue(t.RepeatVal) }
 						m.textInput.CursorEnd()
 					}
 					m.tasksDB[m.selectedDate][m.taskSelIdx] = t
 				}
 				if k == "h" || k == "H" || k == "l" || k == "L" || k == "left" || k == "right" {
 					delta := 5
-					if k == "H" || k == "L" {
-						delta = 60
-					}
-					if k == "h" || k == "H" || k == "left" {
-						delta = -delta
-					}
-
-					if m.editSelIdx == 3 && t.HasStart {
-						t.StartMin = max(0, t.StartMin+delta)
-					} else if m.editSelIdx == 4 && t.HasStart {
-						t.DurationMin = max(0, t.DurationMin+delta)
-					} else if m.editSelIdx == 6 && t.HasCustomDeadline {
-						t.DeadlineMin = max(0, t.DeadlineMin+delta)
-					}
+					if k == "H" || k == "L" { delta = 60 }
+					if k == "h" || k == "H" || k == "left" { delta = -delta }
+					if m.editSelIdx == 3 && t.HasStart { t.StartMin = max(0, t.StartMin+delta)
+					} else if m.editSelIdx == 4 && t.HasStart { t.DurationMin = max(0, t.DurationMin+delta)
+					} else if m.editSelIdx == 6 && t.HasCustomDeadline { t.DeadlineMin = max(0, t.DeadlineMin+delta) }
 					m.tasksDB[m.selectedDate][m.taskSelIdx] = t
 				}
 			}
 
-		case statePomodoro:
-			if k == "q" || k == "esc" {
-				m.state = stateSchedule
-			}
-			if k == "k" || k == "up" {
-				if m.pomoSel > 0 {
-					m.pomoSel--
+		case statePomodoro, statePomodoroRun, stateInfo:
+			if k == "q" || k == "esc" { if m.state == stateInfo { m.state = stateMainMenu } else { m.state = stateSchedule } }
+			if m.state == statePomodoro {
+				if k == "k" || k == "up" { if m.pomoSel > 0 { m.pomoSel-- } }
+				if k == "j" || k == "down" { if m.pomoSel < 3 { m.pomoSel++ } }
+				if k == "h" || k == "left" {
+					if m.pomoSel == 1 && m.workTime > 1 { m.workTime-- }
+					if m.pomoSel == 2 && m.breakTime > 1 { m.breakTime-- }
 				}
-			}
-			if k == "j" || k == "down" {
-				if m.pomoSel < 3 {
-					m.pomoSel++
+				if k == "l" || k == "right" {
+					if m.pomoSel == 1 && m.workTime < 99 { m.workTime++ }
+					if m.pomoSel == 2 && m.breakTime < 99 { m.breakTime++ }
 				}
-			}
-			if k == "h" || k == "left" {
-				if m.pomoSel == 1 && m.workTime > 1 {
-					m.workTime--
-				}
-				if m.pomoSel == 2 && m.breakTime > 1 {
-					m.breakTime--
-				}
-			}
-			if k == "l" || k == "right" {
-				if m.pomoSel == 1 && m.workTime < 99 {
-					m.workTime++
-				}
-				if m.pomoSel == 2 && m.breakTime < 99 {
-					m.breakTime++
-				}
-			}
-			if k == "enter" || k == " " {
-				if m.pomoSel == 0 {
-					if m.isPomoActive && (m.pomoTaskDate != m.selectedDate || m.pomoTaskIdx != m.taskSelIdx) {
-						oldT := m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx]
-						if oldT.Status == 1 {
-							oldT.Status = 2
-							oldT.ElapsedSec += (time.Now().Unix() - oldT.LastStartTimestamp)
-							oldT.LastStartTimestamp = 0
-							saveInstance(oldT, m.pomoTaskDate)
+				if k == "enter" || k == " " {
+					if m.pomoSel == 0 {
+						if m.isPomoActive && (m.pomoTaskDate != m.selectedDate || m.pomoTaskIdx != m.taskSelIdx) {
+							oldT := m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx]
+							if oldT.Status == 1 {
+								oldT.Status = 2; oldT.ElapsedSec += (time.Now().Unix() - oldT.LastStartTimestamp); oldT.LastStartTimestamp = 0
+								saveInstance(oldT, m.pomoTaskDate)
+							}
 						}
-					}
-					m.isPomoActive = true
-					m.isPomoPaused = false
-					m.state = statePomodoroRun
-					m.pomoLastTick = time.Now()
-					m.isWorkPhase = true
-					m.timeRemaining = m.workTime * 60
-					m.sessionTimeElapsed = 0
-					m.isEyeBreakActive = false
-
+						m.isPomoActive = true; m.isPomoPaused = false; m.state = statePomodoroRun; m.pomoLastTick = time.Now()
+						m.isWorkPhase = true; m.timeRemaining = m.workTime * 60; m.sessionTimeElapsed = 0; m.isEyeBreakActive = false
+						t := m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx]
+						if t.Status != 1 { t.Status = 1; t.LastStartTimestamp = time.Now().Unix(); m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx] = t; saveInstance(t, m.pomoTaskDate) }
+					} else if m.pomoSel == 3 { m.eyeBreakEnabled = !m.eyeBreakEnabled }
+				}
+			}
+			if m.state == statePomodoroRun {
+				if k == "s" && !m.isEyeBreakActive {
+					m.isPomoPaused = !m.isPomoPaused
+					if !m.isPomoPaused { m.pomoLastTick = time.Now() }
 					t := m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx]
-					if t.Status != 1 {
-						t.Status = 1
-						t.LastStartTimestamp = time.Now().Unix()
-						m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx] = t
-						saveInstance(t, m.pomoTaskDate)
-					}
-				} else if m.pomoSel == 3 {
-					m.eyeBreakEnabled = !m.eyeBreakEnabled
+					if m.isPomoPaused {
+						if t.Status == 1 { t.Status = 2; t.ElapsedSec += (time.Now().Unix() - t.LastStartTimestamp); t.LastStartTimestamp = 0 }
+					} else { if m.isWorkPhase { t.Status = 1; t.LastStartTimestamp = time.Now().Unix() } }
+					m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx] = t; saveInstance(t, m.pomoTaskDate)
+				}
+				if k == "c" {
+					m.isPomoActive = false
+					t := m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx]
+					if t.Status == 1 { t.Status = 2; t.ElapsedSec += (time.Now().Unix() - t.LastStartTimestamp); t.LastStartTimestamp = 0 }
+					m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx] = t; saveInstance(t, m.pomoTaskDate); m.state = stateSchedule
 				}
 			}
-
-		case statePomodoroRun:
-			if k == "q" || k == "esc" {
-				m.state = stateSchedule
-			}
-			if k == "s" && !m.isEyeBreakActive {
-				m.isPomoPaused = !m.isPomoPaused
-				if !m.isPomoPaused {
-					m.pomoLastTick = time.Now()
-				}
-				t := m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx]
-				if m.isPomoPaused {
-					if t.Status == 1 {
-						t.Status = 2
-						t.ElapsedSec += (time.Now().Unix() - t.LastStartTimestamp)
-						t.LastStartTimestamp = 0
-					}
-				} else {
-					if m.isWorkPhase {
-						t.Status = 1
-						t.LastStartTimestamp = time.Now().Unix()
-					}
-				}
-				m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx] = t
-				saveInstance(t, m.pomoTaskDate)
-			}
-			if k == "c" {
-				m.isPomoActive = false
-				t := m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx]
-				if t.Status == 1 {
-					t.Status = 2
-					t.ElapsedSec += (time.Now().Unix() - t.LastStartTimestamp)
-					t.LastStartTimestamp = 0
-				}
-				m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx] = t
-				saveInstance(t, m.pomoTaskDate)
-				m.state = stateSchedule
-			}
-
-		case stateInfo:
-			if k == "q" || k == "esc" || k == "enter" {
-				m.state = stateMainMenu
-			}
+			if m.state == stateInfo && k == "enter" { m.state = stateMainMenu }
 		}
 
 		m.selectedDate = m.currentWeekSun.AddDate(0, 0, m.schedSelC).Format("2006-01-02")
 		if m.isTaskFocused {
 			tList := m.tasksDB[m.selectedDate]
-			if len(tList) == 0 {
-				m.isTaskFocused = false
-				m.taskSelIdx = 0
-			} else if m.taskSelIdx >= len(tList) {
-				m.taskSelIdx = len(tList) - 1
-			}
+			if len(tList) == 0 { m.isTaskFocused = false; m.taskSelIdx = 0
+			} else if m.taskSelIdx >= len(tList) { m.taskSelIdx = len(tList) - 1 }
 		}
 	}
 	return m, tea.Batch(cmds...)
@@ -908,22 +795,16 @@ func min(a, b int) int {
 func truncateStr(s string, maxLen int) string {
 	runes := []rune(s)
 	if len(runes) > maxLen {
-		if maxLen > 3 {
-			return string(runes[:maxLen-3]) + "..."
-		}
+		if maxLen > 3 { return string(runes[:maxLen-3]) + "..." }
 		return string(runes[:maxLen])
 	}
 	return s
 }
 
 func (m model) View() string {
-	if m.width == 0 {
-		return "Initializing..."
-	}
-
+	if m.width == 0 { return "Initializing..." }
 	if m.width < 52 || m.height < 15 {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-			lipgloss.NewStyle().Foreground(red).Render("Terminal is too small.\nPlease resize window."))
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, lipgloss.NewStyle().Foreground(red).Render("Terminal is too small.\nPlease resize window."))
 	}
 
 	var ui string
@@ -934,59 +815,40 @@ func (m model) View() string {
 		var boxes []string
 		for i, text := range menuItems {
 			style := baseStyle
-			if i == m.mainSel {
-				style = activeStyle
-			}
+			if i == m.mainSel { style = activeStyle }
 			boxes = append(boxes, style.Width(menuW).Height(3).Render(text))
 		}
 		ui = lipgloss.JoinVertical(lipgloss.Center, boxes...)
 
 	case stateWorkoutMenu:
 		days := []string{"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
-		plans := []string{"Push", "Pull", "Legs", "Push", "Pull", "Legs", "Rest"} // Plan Name 2-5, 3-6, 4-7
+		plans := []string{"Push", "Pull", "Legs", "Push", "Pull", "Legs", "Rest"}
 		pids := []int{1, 2, 3, 1, 2, 3, 0}
 		boxW := clamp(m.width-10, 40, 80)
 		
 		var boxes []string
-		title := lipgloss.PlaceHorizontal(boxW, lipgloss.Center, hlWhite.Render("WEEKLY WORKOUT")) + "\n\n"
-		boxes = append(boxes, title)
-
+		boxes = append(boxes, lipgloss.PlaceHorizontal(boxW, lipgloss.Center, hlWhite.Render("WEEKLY WORKOUT"))+"\n\n")
 		for i := 0; i < 7; i++ {
 			dateStr := m.currentWeekSun.AddDate(0, 0, i+1).Format("01/02")
 			fullDateStr := m.currentWeekSun.AddDate(0, 0, i+1).Format("2006-01-02")
 			
-			// Tính độ hoàn thành
 			exList := m.wkExercises[pids[i]]
-			totalEx := len(exList)
-			doneEx := 0
+			totalEx := len(exList); doneEx := 0
 			if totalEx > 0 {
 				for _, ex := range exList {
-					logs := m.wkLogs[fullDateStr][ex.ID]
-					if len(logs) >= ex.TargetSets {
-						doneEx++
-					}
+					if len(m.wkLogs[fullDateStr][ex.ID]) >= ex.TargetSets { doneEx++ }
 				}
 			}
 
 			var status string
-			if totalEx > 0 && doneEx == totalEx {
-				status = hlWhite.Render("[ DONE ]")
-			} else if totalEx == 0 {
-				status = dimText.Render("[ Rest ]")
-			} else {
-				status = dimText.Render(fmt.Sprintf("[%d/%d Ex]", doneEx, totalEx))
-			}
+			if totalEx > 0 && doneEx == totalEx { status = hlWhite.Render("[ DONE ]")
+			} else if totalEx == 0 { status = dimText.Render("[ Rest ]")
+			} else { status = dimText.Render(fmt.Sprintf("[%d/%d Ex]", doneEx, totalEx)) }
 
 			leftText := fmt.Sprintf(" %s (%s)  │  %-6s", days[i], dateStr, plans[i])
-			content := lipgloss.JoinHorizontal(lipgloss.Top,
-				leftText,
-				lipgloss.PlaceHorizontal(boxW-lipgloss.Width(leftText), lipgloss.Right, status),
-			)
-
+			content := lipgloss.JoinHorizontal(lipgloss.Top, leftText, lipgloss.PlaceHorizontal(boxW-lipgloss.Width(leftText), lipgloss.Right, status))
 			style := baseStyle.Copy().Width(boxW).Height(1).Align(lipgloss.Left, lipgloss.Center)
-			if i == m.wkSelDay {
-				style = activeStyle.Copy().Width(boxW).Height(1).Align(lipgloss.Left, lipgloss.Center)
-			}
+			if i == m.wkSelDay { style = activeStyle.Copy().Width(boxW).Height(1).Align(lipgloss.Left, lipgloss.Center) }
 			boxes = append(boxes, style.Render(content))
 		}
 		boxes = append(boxes, "\n"+lipgloss.PlaceHorizontal(boxW, lipgloss.Center, dimText.Render("[j/k] Navigate  [Enter] Open Day  [q] Back")))
@@ -1005,119 +867,131 @@ func (m model) View() string {
 			ui += dimText.Render("   < No exercises defined for this plan. Press [a] to add. >") + "\n"
 		} else {
 			for i, ex := range exList {
-				prefix := "  "
-				if i == m.wkSelEx { prefix = "> " }
-				
+				prefix := "  "; if i == m.wkSelEx { prefix = "> " }
 				logs := m.wkLogs[m.wkDateStr][ex.ID]
 				doneSets := len(logs)
 				
-				nameStr := truncateStr(ex.Name, boxW-25)
-				header := fmt.Sprintf("%s[%d] %- *s (Target: %d sets)", prefix, i+1, boxW-25, nameStr, ex.TargetSets)
+				// [MỚI] Render hiển thị Mức Tạ & Reps mục tiêu lên Header
+				targetStr := fmt.Sprintf("%dx%d", ex.TargetSets, ex.TargetReps)
+				if ex.TargetWeight > 0 { targetStr += fmt.Sprintf(" @ %gkg", ex.TargetWeight) }
 				
-				if doneSets >= ex.TargetSets {
-					ui += dimText.Render(header) + "\n"
-				} else if i == m.wkSelEx {
-					ui += reverseText.Render(header) + "\n"
-				} else {
-					ui += hlWhite.Render(header) + "\n"
-				}
+				nameStr := truncateStr(ex.Name, boxW-25)
+				header := fmt.Sprintf("%s[%d] %- *s (Target: %s)", prefix, i+1, boxW-25, nameStr, targetStr)
+				
+				if doneSets >= ex.TargetSets { ui += dimText.Render(header) + "\n"
+				} else if i == m.wkSelEx { ui += reverseText.Render(header) + "\n"
+				} else { ui += hlWhite.Render(header) + "\n" }
 
-				// Vẽ các Set ở dưới
 				setLine := "      "
 				for s := 1; s <= ex.TargetSets; s++ {
 					if s <= doneSets {
-						setLine += "[v] "
-					} else if s == doneSets+1 && i == m.wkSelEx {
-						setLine += hlWhite.Render("[>] ") // Đang chọn set này
-					} else {
-						setLine += "[ ] "
-					}
+						l := logs[s-1]
+						val := ""
+						if l.WeightKg > 0 { val = fmt.Sprintf(" %gkgx%d", l.WeightKg, l.Reps)
+						} else { val = fmt.Sprintf(" %dr", l.Reps) }
+						setLine += fmt.Sprintf("[v%s] ", val)
+					} else if s == doneSets+1 && i == m.wkSelEx { setLine += hlWhite.Render("[>] ") 
+					} else { setLine += "[ ] " }
 				}
 				ui += setLine + "\n\n"
 			}
 		}
-		ui += lipgloss.PlaceHorizontal(boxW, lipgloss.Center, dimText.Render(strings.Repeat("─", boxW))) + "\n"
-		ui += lipgloss.PlaceHorizontal(boxW, lipgloss.Center, dimText.Render("[Space] Done 1 Set   [s] Skip   [a] Add   [D] Delete   [q] Back"))
+
+		ui += "\n"
+		if m.wkIsResting {
+			barW := clamp(boxW-16, 20, 80)
+			pct := float64(m.wkRestRemain) / float64(max(1, m.wkRestTotal))
+			if pct < 0 { pct = 0 }
+			if pct > 1 { pct = 1 }
+			filled := int(pct * float64(barW))
+
+			bar := ""
+			for i := 0; i < barW; i++ {
+				if i < filled { bar += "█" } else { bar += " " } // [MỚI] Thay '-' thành khoảng trống
+			}
+
+			status := "RESTING"
+			if m.wkRestPaused { status = "PAUSED " }
+			timeStr := fmt.Sprintf("%02d:%02d", m.wkRestRemain/60, m.wkRestRemain%60)
+			
+			ui += lipgloss.PlaceHorizontal(boxW, lipgloss.Center, hlWhite.Render(status+" ["+timeStr+"]")) + "\n"
+			ui += lipgloss.PlaceHorizontal(boxW, lipgloss.Center, dimText.Render("│")+hlWhite.Render(bar)+dimText.Render("│")) + "\n"
+			ui += lipgloss.PlaceHorizontal(boxW, lipgloss.Center, dimText.Render("[p] Pause  [x] Stop  [r] Restart  [q] Hide"))
+		} else {
+			ui += lipgloss.PlaceHorizontal(boxW, lipgloss.Center, dimText.Render(strings.Repeat("─", boxW))) + "\n"
+			ui += lipgloss.PlaceHorizontal(boxW, lipgloss.Center, dimText.Render("[Spc] Quick Log  [e] Edit Last Set  [u] Undo  [R] Reset Ex"))
+		}
+
+	case stateWorkoutLogEdit:
+		editPanelW := clamp(m.width-4, 40, 80)
+		m.wkLogInput.Width = editPanelW - 8
+		boxContent := lipgloss.PlaceHorizontal(editPanelW-4, lipgloss.Center, hlWhite.Render("Edit Last Set (Weight Reps)")) + "\n\n" +
+			lipgloss.NewStyle().Padding(0, 1).Render(m.wkLogInput.View()) + "\n\n" +
+			lipgloss.PlaceHorizontal(editPanelW-4, lipgloss.Center, dimText.Render("[Enter] Save   [Esc] Cancel"))
+
+		modal := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(white).Padding(1, 2).Width(editPanelW).Render(boxContent)
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 
 	case stateWorkoutEditEx:
 		editPanelW := clamp(m.width-4, 40, 80)
 		leftColW := 20
 		rightColW := editPanelW - leftColW - 6
 
-		// Giao diện 1: Khi bật input modal (Giống hệt phần Edit Task)
 		if m.wkIsInsert {
 			title := "Edit Field"
 			if m.wkEditIdx == 0 { title = "Edit Exercise Name" }
 			if m.wkEditIdx == 1 { title = "Edit Target Sets" }
-			if m.wkEditIdx == 2 { title = "Edit Rest Time (s)" }
+			if m.wkEditIdx == 2 { title = "Edit Target Weight (kg)" }
+			if m.wkEditIdx == 3 { title = "Edit Target Reps" }
+			if m.wkEditIdx == 4 { title = "Edit Rest Time (s)" }
 
 			m.wkInputs[m.wkEditIdx].Width = rightColW - 4
 			boxContent := lipgloss.PlaceHorizontal(editPanelW-4, lipgloss.Center, hlWhite.Render(title)) + "\n\n" +
 				lipgloss.NewStyle().Padding(0, 1).Render(m.wkInputs[m.wkEditIdx].View()) + "\n\n" +
 				lipgloss.PlaceHorizontal(editPanelW-4, lipgloss.Center, dimText.Render("[Enter] Confirm   [Esc] Cancel"))
 
-			modal := lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(white).
-				Padding(1, 2).
-				Width(editPanelW).
-				Render(boxContent)
-
+			modal := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(white).Padding(1, 2).Width(editPanelW).Render(boxContent)
 			return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
 		}
 
-		// Giao diện 2: Menu Form list các thông số để duyệt bằng j/k
 		ui = lipgloss.PlaceHorizontal(editPanelW, lipgloss.Center, hlWhite.Render("=== Add Exercise ===")) + "\n\n"
 
 		renderRow := func(idx int, label, val string) string {
 			safeVal := truncateStr(val, rightColW-4)
 			left := fmt.Sprintf("%*s", leftColW, label)
 			right := fmt.Sprintf("[ %-*s ]", rightColW-4, safeVal)
-			
 			rowStr := fmt.Sprintf("%s : %s", left, right)
-			if m.wkEditIdx == idx {
-				return reverseText.Render(rowStr) + "\n"
-			}
+			if m.wkEditIdx == idx { return reverseText.Render(rowStr) + "\n" }
 			return dimText.Render(rowStr) + "\n"
 		}
 
 		ui += renderRow(0, "Name", m.wkInputs[0].Value())
 		ui += renderRow(1, "Target Sets", m.wkInputs[1].Value())
-		ui += renderRow(2, "Rest (s)", m.wkInputs[2].Value())
+		ui += renderRow(2, "Target Weight", m.wkInputs[2].Value())
+		ui += renderRow(3, "Target Reps", m.wkInputs[3].Value())
+		ui += renderRow(4, "Rest (s)", m.wkInputs[4].Value())
 
 		ui += "\n\n" + lipgloss.PlaceHorizontal(editPanelW, lipgloss.Center, dimText.Render("[Enter] Edit Field   [Esc] Cancel   [q] Save Exercise"))
 
-	// --- KẾT THÚC WORKOUT VIEW ---
-
+	// --- SCHEDULE VÀ POMODORO (Giữ nguyên) ---
 	case stateSchedule:
 		dayW := clamp((m.width/7)-2, 5, 16)
 		totalGridW := (dayW + 2) * 7 
-
 		var dayBoxes []string
 		dayNames := []string{"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"}
 		for i := 0; i < 7; i++ {
 			date := m.currentWeekSun.AddDate(0, 0, i)
 			dStr := date.Format("02/01")
 			cnt := len(m.tasksDB[date.Format("2006-01-02")])
-			cntStr := ""
-			if cnt > 0 {
-				cntStr = fmt.Sprintf("[%d]", cnt)
-			}
+			cntStr := ""; if cnt > 0 { cntStr = fmt.Sprintf("[%d]", cnt) }
 
 			content := fmt.Sprintf("%s\n%s\n%s", dayNames[i], dStr, cntStr)
 			style := baseStyle.Copy().Width(dayW).Height(5)
-
 			isToday := isSameDay(date, time.Now())
-			if isToday {
-				style = style.Foreground(red).BorderForeground(red)
-			}
-
+			if isToday { style = style.Foreground(red).BorderForeground(red) }
 			if i == m.schedSelC {
-				if isToday {
-					style = style.Border(lipgloss.ThickBorder()).BorderForeground(red).Foreground(black).Background(red).Bold(true)
-				} else {
-					style = style.Border(lipgloss.ThickBorder()).BorderForeground(white).Foreground(black).Background(white).Bold(true)
-				}
+				if isToday { style = style.Border(lipgloss.ThickBorder()).BorderForeground(red).Foreground(black).Background(red).Bold(true)
+				} else { style = style.Border(lipgloss.ThickBorder()).BorderForeground(white).Foreground(black).Background(white).Bold(true) }
 			}
 			dayBoxes = append(dayBoxes, style.Render(content))
 		}
@@ -1129,57 +1003,25 @@ func (m model) View() string {
 			listUI += dimText.Render("< No tasks for this day >") + "\n"
 		} else {
 			for i, t := range tasks {
-				prefix := "  "
-				if m.isTaskFocused && i == m.taskSelIdx {
-					prefix = "> "
-				}
-
-				statusSym := "[ ]"
-				if t.Status == 1 {
-					statusSym = "[>]"
-				} else if t.Status == 2 {
-					statusSym = "[||]"
-				} else if t.Status == 3 {
-					statusSym = "[v]"
-				} else if t.Status == 4 {
-					statusSym = "[S]"
-				}
-
-				timeStr := "     "
-				if t.HasStart {
-					timeStr = formatTime24(t.StartMin)
-				}
-
-				sep := " │ "
-				if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == i {
-					sep = " P "
-				}
-
-				pct := 0.0
-				if t.DurationMin > 0 {
-					pct = (float64(getElapsedSec(t)) / float64(t.DurationMin*60)) * 100
-				}
+				prefix := "  "; if m.isTaskFocused && i == m.taskSelIdx { prefix = "> " }
+				statusSym := "[ ]"; if t.Status == 1 { statusSym = "[>]" } else if t.Status == 2 { statusSym = "[||]" } else if t.Status == 3 { statusSym = "[v]" } else if t.Status == 4 { statusSym = "[S]" }
+				timeStr := "     "; if t.HasStart { timeStr = formatTime24(t.StartMin) }
+				sep := " │ "; if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == i { sep = " P " }
+				pct := 0.0; if t.DurationMin > 0 { pct = (float64(getElapsedSec(t)) / float64(t.DurationMin*60)) * 100 }
 				pctStr := fmt.Sprintf("[%5.1f%%]", pct)
 
 				staticSpace := len(prefix) + len(statusSym) + 1 + len(timeStr) + len(sep) + len(pctStr) + 2
 				maxNameLen := m.width - staticSpace - 4
-				if maxNameLen > totalGridW - staticSpace {
-					maxNameLen = totalGridW - staticSpace
-				}
+				if maxNameLen > totalGridW - staticSpace { maxNameLen = totalGridW - staticSpace }
 				if maxNameLen < 5 { maxNameLen = 5 } 
 
 				safeName := truncateStr(t.Name, maxNameLen)
 				paddedName := fmt.Sprintf("%-*s", maxNameLen, safeName)
 
 				row := fmt.Sprintf("%s%s %s%s%s %s", prefix, statusSym, timeStr, sep, paddedName, pctStr)
-
-				if m.isTaskFocused && i == m.taskSelIdx {
-					row = reverseText.Render(row)
-				} else if t.Status == 1 {
-					row = hlWhite.Render(row)
-				} else if t.Status == 3 || t.Status == 4 {
-					row = dimText.Render(row)
-				}
+				if m.isTaskFocused && i == m.taskSelIdx { row = reverseText.Render(row)
+				} else if t.Status == 1 { row = hlWhite.Render(row)
+				} else if t.Status == 3 || t.Status == 4 { row = dimText.Render(row) }
 				listUI += row + "\n"
 			}
 		}
@@ -1188,99 +1030,47 @@ func (m model) View() string {
 	case stateTaskEdit:
 		t := m.tasksDB[m.selectedDate][m.taskSelIdx]
 		editPanelW := clamp(m.width-4, 40, 80)
-		leftColW := 20
-		rightColW := editPanelW - leftColW - 6
-
-		idxRep := 3
-		if t.HasStart {
-			idxRep = 6
-			if t.HasCustomDeadline {
-				idxRep = 7
-			}
-		}
+		leftColW := 20; rightColW := editPanelW - leftColW - 6
+		idxRep := 3; if t.HasStart { idxRep = 6; if t.HasCustomDeadline { idxRep = 7 } }
 
 		if m.isInsertMode {
 			title := "Edit Field"
-			if m.editSelIdx == 0 { title = "Edit Name" }
-			if m.editSelIdx == 1 { title = "Edit Description" }
-			if m.editSelIdx == 3 { title = "Edit Start Time (HH:MM)" }
-			if m.editSelIdx == 4 { title = "Edit Duration (Min)" }
-			if m.editSelIdx == 6 { title = "Edit Deadline (HH:MM)" }
-			if m.editSelIdx == idxRep+1 { title = "Edit Repeat Value" }
-
+			if m.editSelIdx == 0 { title = "Edit Name" } else if m.editSelIdx == 1 { title = "Edit Description" } else if m.editSelIdx == 3 { title = "Edit Start Time (HH:MM)" } else if m.editSelIdx == 4 { title = "Edit Duration (Min)" } else if m.editSelIdx == 6 { title = "Edit Deadline (HH:MM)" } else if m.editSelIdx == idxRep+1 { title = "Edit Repeat Value" }
 			m.textInput.Width = rightColW - 4
-			boxContent := lipgloss.PlaceHorizontal(editPanelW-4, lipgloss.Center, hlWhite.Render(title)) + "\n\n" +
-				lipgloss.NewStyle().Padding(0, 1).Render(m.textInput.View()) + "\n\n" +
-				lipgloss.PlaceHorizontal(editPanelW-4, lipgloss.Center, dimText.Render("[Enter] Confirm   [Esc] Cancel"))
-
-			modal := lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(white).
-				Padding(1, 2).
-				Width(editPanelW).
-				Render(boxContent)
-
-			return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modal)
+			boxContent := lipgloss.PlaceHorizontal(editPanelW-4, lipgloss.Center, hlWhite.Render(title)) + "\n\n" + lipgloss.NewStyle().Padding(0, 1).Render(m.textInput.View()) + "\n\n" + lipgloss.PlaceHorizontal(editPanelW-4, lipgloss.Center, dimText.Render("[Enter] Confirm   [Esc] Cancel"))
+			return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(white).Padding(1, 2).Width(editPanelW).Render(boxContent))
 		}
 
 		ui = lipgloss.PlaceHorizontal(editPanelW, lipgloss.Center, hlWhite.Render("=== Edit Task ===")) + "\n\n"
-
 		renderRow := func(idx int, label, val string, isField bool) string {
 			safeVal := truncateStr(val, rightColW-4)
 			left := fmt.Sprintf("%*s", leftColW, label)
 			right := fmt.Sprintf("< %-*s >", rightColW-4, safeVal)
-			if isField {
-				right = fmt.Sprintf("[ %-*s ]", rightColW-4, safeVal)
-			}
-
+			if isField { right = fmt.Sprintf("[ %-*s ]", rightColW-4, safeVal) }
 			rowStr := fmt.Sprintf("%s : %s", left, right)
-			if m.editSelIdx == idx {
-				return reverseText.Render(rowStr) + "\n"
-			}
+			if m.editSelIdx == idx { return reverseText.Render(rowStr) + "\n" }
 			return dimText.Render(rowStr) + "\n"
 		}
 
-		ui += renderRow(0, "Name", t.Name, true)
-		ui += renderRow(1, "Description", t.Desc, true)
-		ui += renderRow(2, "Has Start Time", map[bool]string{true: "Yes", false: "No"}[t.HasStart], true)
-
+		ui += renderRow(0, "Name", t.Name, true) + renderRow(1, "Description", t.Desc, true) + renderRow(2, "Has Start Time", map[bool]string{true: "Yes", false: "No"}[t.HasStart], true)
 		if t.HasStart {
-			ui += renderRow(3, "Start Time", formatTime24(t.StartMin), false)
-			ui += renderRow(4, "Duration", formatTime24(t.DurationMin), false)
-			ui += renderRow(5, "Custom Deadline", map[bool]string{true: "Yes", false: "No"}[t.HasCustomDeadline], true)
-			if t.HasCustomDeadline {
-				ui += renderRow(6, "Deadline Time", formatTime24(t.DeadlineMin), false)
-			}
+			ui += renderRow(3, "Start Time", formatTime24(t.StartMin), false) + renderRow(4, "Duration", formatTime24(t.DurationMin), false) + renderRow(5, "Custom Deadline", map[bool]string{true: "Yes", false: "No"}[t.HasCustomDeadline], true)
+			if t.HasCustomDeadline { ui += renderRow(6, "Deadline Time", formatTime24(t.DeadlineMin), false) }
 		}
-
-		rStr := []string{"None", "Interval", "Weekly", "After Done"}[t.RepeatType]
-		ui += "\n" + renderRow(idxRep, "Repeat Type", rStr, true)
-		if t.RepeatType > 0 {
-			ui += renderRow(idxRep+1, "Repeat Value", t.RepeatVal, true)
-		}
-
-		elap := getElapsedSec(t)
-		timeStr := fmt.Sprintf("%02d:%02d:%02d", elap/3600, (elap%3600)/60, elap%60)
+		rStr := []string{"None", "Interval", "Weekly", "After Done"}[t.RepeatType]; ui += "\n" + renderRow(idxRep, "Repeat Type", rStr, true)
+		if t.RepeatType > 0 { ui += renderRow(idxRep+1, "Repeat Value", t.RepeatVal, true) }
+		elap := getElapsedSec(t); timeStr := fmt.Sprintf("%02d:%02d:%02d", elap/3600, (elap%3600)/60, elap%60)
 		ui += fmt.Sprintf("\n%s\n", lipgloss.PlaceHorizontal(editPanelW, lipgloss.Center, dimText.Render("Elapsed Time      : "+timeStr)))
 		ui += lipgloss.PlaceHorizontal(editPanelW, lipgloss.Center, dimText.Render("[i/Enter] Edit  [Esc] Back  [h/l] +/-  [q] Save"))
 
 	case statePomodoro:
 		tName := m.tasksDB[m.pomoTaskDate][m.pomoTaskIdx].Name
-		safeName := truncateStr(tName, clamp(m.width-10, 20, 60))
-		ui = hlWhite.Render("Task: "+safeName) + "\n\n"
-		
+		ui = hlWhite.Render("Task: "+truncateStr(tName, clamp(m.width-10, 20, 60))) + "\n\n"
 		boxW := clamp(m.width/2, 26, 40)
-		items := []string{
-			"Start Timer",
-			fmt.Sprintf("Work: < %d > min", m.workTime),
-			fmt.Sprintf("Break: < %d > min", m.breakTime),
-			fmt.Sprintf("Eye Break: < %v >", map[bool]string{true: "ON", false: "OFF"}[m.eyeBreakEnabled]),
-		}
+		items := []string{"Start Timer", fmt.Sprintf("Work: < %d > min", m.workTime), fmt.Sprintf("Break: < %d > min", m.breakTime), fmt.Sprintf("Eye Break: < %v >", map[bool]string{true: "ON", false: "OFF"}[m.eyeBreakEnabled])}
 		for i, text := range items {
 			style := baseStyle.Copy().Width(boxW).Height(3)
-			if i == m.pomoSel {
-				style = activeStyle.Copy().Width(boxW).Height(3)
-			}
+			if i == m.pomoSel { style = activeStyle.Copy().Width(boxW).Height(3) }
 			ui += style.Render(text) + "\n"
 		}
 
@@ -1288,47 +1078,22 @@ func (m model) View() string {
 		if m.isEyeBreakActive {
 			ui = hlWhite.Render("EYE BREAK: LOOK 20 FEET AWAY") + "\n\n" + fmt.Sprintf("Resuming in %ds", m.eyeBreakRemaining)
 		} else {
-			phase := "WORK PHASE"
-			if !m.isWorkPhase {
-				phase = "BREAK PHASE"
-			}
-			if m.isPomoPaused {
-				phase += " (PAUSED)"
-			}
-
+			phase := "WORK PHASE"; if !m.isWorkPhase { phase = "BREAK PHASE" }; if m.isPomoPaused { phase += " (PAUSED)" }
 			h, mRem, s := m.timeRemaining/3600, (m.timeRemaining%3600)/60, m.timeRemaining%60
 			ui = hlWhite.Render(phase) + "\n\n" + fmt.Sprintf("%02d:%02d:%02d", h, mRem, s) + "\n\n"
 
-			total := m.workTime * 60
-			if !m.isWorkPhase {
-				total = m.breakTime * 60
-			}
-
+			total := m.workTime * 60; if !m.isWorkPhase { total = m.breakTime * 60 }
 			barW := clamp(m.width-16, 20, 80) 
 			pct := 1.0 - (float64(m.timeRemaining) / float64(max(1, total)))
-			filled := int(pct * float64(barW))
-			bar := ""
-			for i := 0; i < barW; i++ {
-				if i < filled {
-					bar += "█"
-				} else {
-					bar += "─"
-				}
-			}
-			
-			topBorder := "┌" + strings.Repeat("─", barW) + "┐\n"
-			botBorder := "└" + strings.Repeat("─", barW) + "┘\n\n"
-
-			ui += dimText.Render(topBorder)
-			ui += dimText.Render("│") + hlWhite.Render(bar) + dimText.Render("│\n")
-			ui += dimText.Render(botBorder)
-			ui += dimText.Render("[s] Pause/Resume  [c] Cancel  [q] Background")
+			filled := int(pct * float64(barW)); bar := ""
+			for i := 0; i < barW; i++ { if i < filled { bar += "█" } else { bar += "─" } }
+			topBorder := "┌" + strings.Repeat("─", barW) + "┐\n"; botBorder := "└" + strings.Repeat("─", barW) + "┘\n\n"
+			ui += dimText.Render(topBorder) + dimText.Render("│") + hlWhite.Render(bar) + dimText.Render("│\n") + dimText.Render(botBorder) + dimText.Render("[s] Pause/Resume  [c] Cancel  [q] Background")
 		}
 
 	case stateInfo:
 		contentWidth := clamp(m.width-10, 45, 75)
 		title := lipgloss.PlaceHorizontal(contentWidth, lipgloss.Center, hlWhite.Render("MANUAL & KEYBINDS")) + "\n\n"
-
 		renderSection := func(name string, items [][]string) string {
 			res := lipgloss.PlaceHorizontal(contentWidth, lipgloss.Center, hlWhite.Render(name)) + "\n"
 			leftW := (contentWidth / 2) - 2
@@ -1338,49 +1103,19 @@ func (m model) View() string {
 			}
 			return res + "\n"
 		}
-
-		content := title +
-			renderSection("[ Global & Schedule ]", [][]string{
-				{"j/k, h/l", "Navigate / Change Date"},
-				{"Enter, Space", "Select / Toggle"},
-				{"q, ESC", "Back / Cancel / Exit"},
-				{"t", "Jump to Today"},
-				{"a, D/X", "Add Task, Delete (X=Series)"},
-				{"s, d, p", "Start, Done, Pomodoro"},
-			}) +
-			renderSection("[ Task Edit & Pomodoro ]", [][]string{
-				{"h/l, H/L", "Adjust Time 5m, 60m"},
-				{"i, Enter", "Edit Field"},
-				{"q", "Save Changes"},
-				{"s, c", "Pause, Cancel Pomodoro"},
-			}) +
-			renderSection("[ Workout ]", [][]string{
-				{"Space", "Log 1 Set"},
-				{"s", "Skip/Fill Sets"},
-				{"a, D", "Add, Delete Exercise"},
-			})
-
-		ui = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(dimGray).Foreground(dimGray).
-			Width(contentWidth+4).Padding(1, 2).Align(lipgloss.Left).Render(content)
+		content := title + renderSection("[ Global & Schedule ]", [][]string{{"j/k, h/l", "Navigate / Change Date"}, {"Enter, Space", "Select / Toggle"}, {"q, ESC", "Back / Cancel / Exit"}, {"t", "Jump to Today"}, {"a, D/X", "Add Task, Delete (X=Series)"}, {"s, d, p", "Start, Done, Pomodoro"}}) + renderSection("[ Task Edit & Pomodoro ]", [][]string{{"h/l, H/L", "Adjust Time 5m, 60m"}, {"i, Enter", "Edit Field"}, {"q", "Save Changes"}, {"s, c", "Pause, Cancel Pomodoro"}}) + renderSection("[ Workout ]", [][]string{{"Spc, e", "Quick Log / Edit Last Set"}, {"u, R, s", "Undo Set / Reset Ex / Skip"}, {"p, x, r", "Rest: Pause / Stop / Restart"}})
+		ui = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(dimGray).Foreground(dimGray).Width(contentWidth+4).Padding(1, 2).Align(lipgloss.Left).Render(content)
 	}
 
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, ui)
 }
 
-func max(a, b int) int {
-	if a > b { return a }
-	return b
-}
+func max(a, b int) int { if a > b { return a }; return b }
 
 func (m model) startInsertMode() model {
 	t := Task{CreatedDate: m.selectedDate, Name: "New Task", DurationMin: 60, StartMin: 480}
 	m.tasksDB[m.selectedDate] = append(m.tasksDB[m.selectedDate], t)
-	m.state = stateTaskEdit
-	m.taskSelIdx = len(m.tasksDB[m.selectedDate]) - 1
-	m.editSelIdx = 0
-
-	m.isInsertMode = true
-	m.textInput.Reset()
+	m.state = stateTaskEdit; m.taskSelIdx = len(m.tasksDB[m.selectedDate]) - 1; m.editSelIdx = 0; m.isInsertMode = true; m.textInput.Reset()
 	return m
 }
 
@@ -1390,82 +1125,43 @@ func (m model) toggleTaskState() model {
 		for dKey, tList := range m.tasksDB {
 			for i, otherT := range tList {
 				if otherT.Status == 1 && (dKey != m.selectedDate || otherT.ID != t.ID) {
-					otherT.Status = 2
-					otherT.ElapsedSec += (time.Now().Unix() - otherT.LastStartTimestamp)
-					otherT.LastStartTimestamp = 0
-					saveInstance(otherT, dKey)
-					m.tasksDB[dKey][i] = otherT
+					otherT.Status = 2; otherT.ElapsedSec += (time.Now().Unix() - otherT.LastStartTimestamp); otherT.LastStartTimestamp = 0; saveInstance(otherT, dKey); m.tasksDB[dKey][i] = otherT
 				}
 			}
 		}
-		t.Status = 1
-		t.LastStartTimestamp = time.Now().Unix()
-		notifySend("low", "Task Started", "Working on: "+t.Name)
-		if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == m.taskSelIdx {
-			m.isPomoPaused = false
-			m.pomoLastTick = time.Now()
-		}
+		t.Status = 1; t.LastStartTimestamp = time.Now().Unix(); notifySend("low", "Task Started", "Working on: "+t.Name)
+		if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == m.taskSelIdx { m.isPomoPaused = false; m.pomoLastTick = time.Now() }
 	} else if t.Status == 1 {
-		t.Status = 2
-		t.ElapsedSec += (time.Now().Unix() - t.LastStartTimestamp)
-		t.LastStartTimestamp = 0
-		if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == m.taskSelIdx {
-			m.isPomoPaused = true
-		}
+		t.Status = 2; t.ElapsedSec += (time.Now().Unix() - t.LastStartTimestamp); t.LastStartTimestamp = 0
+		if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == m.taskSelIdx { m.isPomoPaused = true }
 	}
-	m.tasksDB[m.selectedDate][m.taskSelIdx] = t
-	saveInstance(t, m.selectedDate)
+	m.tasksDB[m.selectedDate][m.taskSelIdx] = t; saveInstance(t, m.selectedDate)
 	return m.reloadTasks()
 }
 
 func (m model) markTaskDone() model {
 	t := m.tasksDB[m.selectedDate][m.taskSelIdx]
-	if t.Status == 1 {
-		t.ElapsedSec += (time.Now().Unix() - t.LastStartTimestamp)
-		t.LastStartTimestamp = 0
-	}
-	t.Status = 3
-	saveInstance(t, m.selectedDate)
-	if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == m.taskSelIdx {
-		m.isPomoActive = false
-	}
-
+	if t.Status == 1 { t.ElapsedSec += (time.Now().Unix() - t.LastStartTimestamp); t.LastStartTimestamp = 0 }
+	t.Status = 3; saveInstance(t, m.selectedDate)
+	if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == m.taskSelIdx { m.isPomoActive = false }
 	if t.RepeatType == 3 {
-		nDays, _ := strconv.Atoi(t.RepeatVal)
-		if nDays <= 0 {
-			nDays = 1
-		}
+		nDays, _ := strconv.Atoi(t.RepeatVal); if nDays <= 0 { nDays = 1 }
 		targetStr := m.currentWeekSun.AddDate(0, 0, m.schedSelC+nDays).Format("2006-01-02")
-		clone := t
-		clone.ID = 0
-		clone.Status = 0
-		clone.ElapsedSec = 0
-		clone.LastStartTimestamp = 0
-		clone.CreatedDate = targetStr
+		clone := t; clone.ID = 0; clone.Status = 0; clone.ElapsedSec = 0; clone.LastStartTimestamp = 0; clone.CreatedDate = targetStr
 		insertSeries(&clone)
 	}
-	m.tasksDB[m.selectedDate][m.taskSelIdx] = t
-	return m.reloadTasks()
+	m.tasksDB[m.selectedDate][m.taskSelIdx] = t; return m.reloadTasks()
 }
 
 func (m model) deleteTask(isSeries bool) model {
 	t := m.tasksDB[m.selectedDate][m.taskSelIdx]
-	if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == m.taskSelIdx {
-		m.isPomoActive = false
-	}
-
+	if m.isPomoActive && m.pomoTaskDate == m.selectedDate && m.pomoTaskIdx == m.taskSelIdx { m.isPomoActive = false }
 	if isSeries && t.ID != 0 && t.RepeatType > 0 {
 		yest := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
-		if t.UntilDate == "" || t.UntilDate > yest {
-			db.Exec("UPDATE series SET until_date = ? WHERE id = ?", yest, t.ID)
-		}
+		if t.UntilDate == "" || t.UntilDate > yest { db.Exec("UPDATE series SET until_date = ? WHERE id = ?", yest, t.ID) }
 	} else {
-		if t.RepeatType > 0 {
-			t.Status = 4
-			saveInstance(t, m.selectedDate)
-		} else {
-			db.Exec("DELETE FROM series WHERE id=?", t.ID)
-		}
+		if t.RepeatType > 0 { t.Status = 4; saveInstance(t, m.selectedDate)
+		} else { db.Exec("DELETE FROM series WHERE id=?", t.ID) }
 	}
 	return m.reloadTasks()
 }
